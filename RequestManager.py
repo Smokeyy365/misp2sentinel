@@ -9,6 +9,7 @@ from constants import *
 import time
 import sys
 import logging
+import uuid
 
 
 class RequestManager:
@@ -223,7 +224,7 @@ class RequestManager:
             batch = parsed_indicators[:config.ms_max_indicators_request]
             stix_bundle = {
                 "type": "bundle",
-                "id": "bundle--" + hashlib.sha256(str(time.time()).encode()).hexdigest()[:36],
+                "id": f"bundle--{uuid.uuid4()}",
                 "objects": batch
             }
             

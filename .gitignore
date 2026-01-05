@@ -3,4 +3,6 @@
 .vscode/settings.json
 .vscode/tasks.json
 connector/*
-config.py__pycache__/
+config.py
+__pycache__/
+*.pyc
