@@ -190,6 +190,137 @@ class RequestObject_Indicator:
         self.labels = new_labels
 
 
+class RequestObject_ThreatActor:
+    """Class to handle threat-actor STIX objects for the STIX Objects API"""
+    
+    def _get_dict(self):
+        dict = {}
+        dict["type"] = self.type
+        dict["spec_version"] = self.spec_version
+        dict["id"] = self.id
+        dict["created"] = json.dumps(self.created, cls=STIXJSONEncoder).replace("\"", "")
+        dict["modified"] = json.dumps(self.modified, cls=STIXJSONEncoder).replace("\"", "")
+        dict["name"] = self.name
+        if hasattr(self, "description") and self.description:
+            dict["description"] = self.description
+        if hasattr(self, "threat_actor_types") and self.threat_actor_types:
+            dict["threat_actor_types"] = self.threat_actor_types
+        if hasattr(self, "aliases") and self.aliases:
+            dict["aliases"] = self.aliases
+        if hasattr(self, "labels") and self.labels:
+            dict["labels"] = self.labels
+        if hasattr(self, "object_marking_refs") and self.object_marking_refs:
+            dict["object_marking_refs"] = self.object_marking_refs
+        if hasattr(self, "external_references") and self.external_references:
+            dict["external_references"] = self.external_references
+        return dict
+
+    def __init__(self, element, misp_event, logger):
+        self.misp_event = misp_event
+        self.logger = logger
+        
+        # Convert all the STIX threat-actor elements
+        for el in element:
+            setattr(self, el, element[el])
+        
+        # Add reference to MISP event
+        if not hasattr(self, "external_references"):
+            self.external_references = []
+        self.external_references.append({
+            "source_name": "MISP",
+            "description": "MISP Event: {}".format(misp_event.info),
+            "external_id": misp_event.uuid,
+            "url": "{}/events/view/{}".format(config.misp_domain, misp_event.uuid)
+        })
+
+
+class RequestObject_Identity:
+    """Class to handle identity STIX objects for the STIX Objects API"""
+    
+    def _get_dict(self):
+        dict = {}
+        dict["type"] = self.type
+        dict["spec_version"] = self.spec_version
+        dict["id"] = self.id
+        dict["created"] = json.dumps(self.created, cls=STIXJSONEncoder).replace("\"", "")
+        dict["modified"] = json.dumps(self.modified, cls=STIXJSONEncoder).replace("\"", "")
+        dict["name"] = self.name
+        dict["identity_class"] = self.identity_class
+        if hasattr(self, "description") and self.description:
+            dict["description"] = self.description
+        if hasattr(self, "sectors") and self.sectors:
+            dict["sectors"] = self.sectors
+        if hasattr(self, "contact_information") and self.contact_information:
+            dict["contact_information"] = self.contact_information
+        if hasattr(self, "labels") and self.labels:
+            dict["labels"] = self.labels
+        if hasattr(self, "object_marking_refs") and self.object_marking_refs:
+            dict["object_marking_refs"] = self.object_marking_refs
+        if hasattr(self, "external_references") and self.external_references:
+            dict["external_references"] = self.external_references
+        return dict
+
+    def __init__(self, element, misp_event, logger):
+        self.misp_event = misp_event
+        self.logger = logger
+        
+        # Convert all the STIX identity elements
+        for el in element:
+            setattr(self, el, element[el])
+        
+        # Add reference to MISP event
+        if not hasattr(self, "external_references"):
+            self.external_references = []
+        self.external_references.append({
+            "source_name": "MISP",
+            "description": "MISP Event: {}".format(misp_event.info),
+            "external_id": misp_event.uuid,
+            "url": "{}/events/view/{}".format(config.misp_domain, misp_event.uuid)
+        })
+
+
+class RequestObject_Relationship:
+    """Class to handle relationship STIX objects for the STIX Objects API"""
+    
+    def _get_dict(self):
+        dict = {}
+        dict["type"] = self.type
+        dict["spec_version"] = self.spec_version
+        dict["id"] = self.id
+        dict["created"] = json.dumps(self.created, cls=STIXJSONEncoder).replace("\"", "")
+        dict["modified"] = json.dumps(self.modified, cls=STIXJSONEncoder).replace("\"", "")
+        dict["relationship_type"] = self.relationship_type
+        dict["source_ref"] = self.source_ref
+        dict["target_ref"] = self.target_ref
+        if hasattr(self, "description") and self.description:
+            dict["description"] = self.description
+        if hasattr(self, "labels") and self.labels:
+            dict["labels"] = self.labels
+        if hasattr(self, "object_marking_refs") and self.object_marking_refs:
+            dict["object_marking_refs"] = self.object_marking_refs
+        if hasattr(self, "external_references") and self.external_references:
+            dict["external_references"] = self.external_references
+        return dict
+
+    def __init__(self, element, misp_event, logger):
+        self.misp_event = misp_event
+        self.logger = logger
+        
+        # Convert all the STIX relationship elements
+        for el in element:
+            setattr(self, el, element[el])
+        
+        # Add reference to MISP event
+        if not hasattr(self, "external_references"):
+            self.external_references = []
+        self.external_references.append({
+            "source_name": "MISP",
+            "description": "MISP Event: {}".format(misp_event.info),
+            "external_id": misp_event.uuid,
+            "url": "{}/events/view/{}".format(config.misp_domain, misp_event.uuid)
+        })
+
+
 class RequestObject_Event:
     def __init__(self, event, logger, misp_flatten_attributes=False):
         if misp_flatten_attributes:

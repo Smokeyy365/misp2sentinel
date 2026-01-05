@@ -24,21 +24,18 @@ keyVaultName = "<unique-name>"
 # Microsoft section
 #
 ms_auth = {
-    'tenant': '<tenant>',
+    'tenant_id': '<tenant>',
     'client_id': '<client_id>',
     'client_secret': '<client_secret>',
-    'graph_api': False,                                 # Set to False to use Upload Indicators API   
-    #'scope': 'https://graph.microsoft.com/.default',   # Scope for GraphAPI
-    'scope': 'https://management.azure.com/.default',   # Scope for Upload Indicators API
-    'workspace_id': '<workspace_id>'
+    'scope': 'https://sentinel.azure.com/.default'   # Scope for STIX Objects API
 }
 
-ms_passiveonly = False              # Graph API only
-ms_action = 'alert'                 # Graph API only
+# Sentinel STIX Objects API
+sentinel_api_endpoint = "https://api.ti.sentinel.azure.com"
+sentinel_workspace_id = "<workspace-id>"
 
-ms_api_version = "2022-07-01"       # Upload Indicators API version
-ms_max_indicators_request = 100     # Upload Indicators API: Throttle max: 100 indicators per request
-ms_max_requests_minute = 100        # Upload Indicators API: Throttle max: 100 requests per minute
+ms_max_indicators_request = 100     # STIX Objects API: Throttle max: 100 indicators per request
+ms_max_requests_minute = 100        # STIX Objects API: Throttle max: 100 requests per minute
 
 
 ####

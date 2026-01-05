@@ -45,7 +45,7 @@ class RequestManager:
             self.expiration_date = self._get_expiration_date_from_config()
         self.hash_of_indicators_to_delete = copy.deepcopy(self.existing_indicators_hash)
         access_token = self._get_access_token(
-            config.ms_auth[TENANT],
+            config.ms_auth[TENANT_ID],
             config.ms_auth[CLIENT_ID],
             config.ms_auth[CLIENT_SECRET],
             config.ms_auth[SCOPE])
@@ -66,7 +66,7 @@ class RequestManager:
         return (datetime.datetime.utcnow() + datetime.timedelta(config.days_to_expire)).strftime('%Y-%m-%d')
 
     #@staticmethod
-    def _get_access_token(self, tenant, client_id, client_secret, scope):
+    def _get_access_token(self, tenant_id, client_id, client_secret, scope):
         data = {
             CLIENT_ID: client_id,
             'scope': scope,
@@ -76,7 +76,7 @@ class RequestManager:
 
         try:
             access_token_response = requests.post(
-                f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token',
+                f'https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token',
                 data=data
             ).json()
             if ACCESS_TOKEN in access_token_response:
@@ -89,7 +89,7 @@ class RequestManager:
                 self.logger.error("Exiting. No access token {} found.".format(ACCESS_TOKEN))
                 sys.exit("Exiting. No access token {} found.".format(ACCESS_TOKEN))
         except requests.exceptions.RequestException as err:
-            logging.error(f"Failed to get access token with: Tenant: {tenant} | ClientId: {client_id} | Scope: {scope} | Err: {err}")
+            logging.error(f"Failed to get access token with: Tenant: {tenant_id} | ClientId: {client_id} | Scope: {scope} | Err: {err}")
         except Exception as e:
             logging.error(f"An unexpected error occurred: {e}")
 
@@ -121,20 +121,8 @@ class RequestManager:
         ).hexdigest()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-
-        if config.ms_auth["graph_api"]:
-            self._post_to_graph()
-            self._del_indicators_no_longer_exist()
-
-            self.expiration_date_fd.seek(0)
-            self.expiration_date_fd.write(self.expiration_date)
-            self.expiration_date_fd.truncate()
-
-            self.existing_indicators_hash_fd.seek(0)
-            json.dump(self.existing_indicators_hash, self.existing_indicators_hash_fd, indent=2)
-            self.existing_indicators_hash_fd.truncate()
-
-            self._print_summary()
+        # No longer using Graph API - exit gracefully
+        pass
 
     def _log_post(self, response):
         # self._clear_screen()
@@ -215,9 +203,11 @@ class RequestManager:
         self._log_post(response)
 
     def upload_indicators(self, parsed_indicators):
+        """Upload STIX objects to Microsoft Sentinel using the STIX Objects API"""
         requests_number = 0
         start_timestamp = self._get_timestamp()
         safe_margin = 3
+        
         while len(parsed_indicators) > 0:
             if requests_number >= config.ms_max_requests_minute:
                 sleep_time = (config.ms_max_requests_minute + safe_margin) - (self._get_timestamp() - start_timestamp)
@@ -226,18 +216,26 @@ class RequestManager:
                     time.sleep(sleep_time)
                 requests_number = 0
                 start_timestamp = self._get_timestamp()
+            
             self._update_headers_if_expired()
-            workspace_id = config.ms_auth["workspace_id"]
-            api_version = config.ms_api_version
-            request_url = f"https://sentinelus.azure-api.net/{workspace_id}/threatintelligence:upload-indicators?api-version={api_version}"
-            request_body = {"sourcesystem": config.sourcesystem, "value": parsed_indicators[:config.ms_max_indicators_request]}
-
+            
+            # Prepare STIX bundle for upload
+            batch = parsed_indicators[:config.ms_max_indicators_request]
+            stix_bundle = {
+                "type": "bundle",
+                "id": "bundle--" + hashlib.sha256(str(time.time()).encode()).hexdigest()[:36],
+                "objects": batch
+            }
+            
+            workspace_id = config.sentinel_workspace_id
+            request_url = f"{config.sentinel_api_endpoint}/{workspace_id}/threatintelligence/stixobjects:upload?api-version=2024-02-01"
+            
             # Setting result retry as true to enter the loop
             result = {"retry": True, "breakRun": False}
 
             while result.get("retry", True):
-                response = requests.post(request_url, headers=self.headers, json=request_body)
-                result = self.handle_response_codes(response, safe_margin, requests_number, request_body, parsed_indicators)
+                response = requests.post(request_url, headers=self.headers, json=stix_bundle)
+                result = self.handle_response_codes(response, safe_margin, requests_number, stix_bundle, parsed_indicators)
                 # If retry is true, retry the request, otherwise continue to the next indicator
                 if result.get("retry", False):
                     requests_number += 1
@@ -269,21 +267,23 @@ class RequestManager:
         return {"retry": True, "breakRun": False, "parsed_indicators": parsed_indicators}
     
     def handle_success_response(self, response, request_body, parsed_indicators, requests_number):
-        if "errors" in response.json() and len(response.json()["errors"]) > 0:
+        response_json = response.json()
+        if "errors" in response_json and len(response_json["errors"]) > 0:
             if config.sentinel_write_response:
-                json_formatted_str = json.dumps(response.json(), indent=4)
+                json_formatted_str = json.dumps(response_json, indent=4)
                 with open("sentinel_response.txt", "a") as fp:
                     fp.write(json_formatted_str)
-            self.logger.error("Error when submitting indicators - error string received from Sentinel. {}".format(response.text))
+            self.logger.error("Error when submitting STIX objects - error string received from Sentinel. {}".format(response.text))
             return {"retry": False, "breakRun": True}
         else:
             parsed_indicators = parsed_indicators[config.ms_max_indicators_request:]
+            batch_size = len(request_body.get("objects", request_body.get("value", [])))
             self.logger.info(
-                "Indicators sent - request number: {} / indicators: {} / remaining: {}".format(requests_number, len(request_body["value"]), len(parsed_indicators)))
+                "STIX objects sent - request number: {} / objects: {} / remaining: {}".format(requests_number, batch_size, len(parsed_indicators)))
             return {"retry": False, "breakRun": False, "parsed_indicators": parsed_indicators}
 
     def handle_error_response(self, response):
-        self.logger.error("Error when submitting indicators. Non HTTP-200 response. {}".format(response.text))
+        self.logger.error("Error when submitting STIX objects. Non HTTP-200 response. {}".format(response.text))
         return {"retry": False, "breakRun": True}
     
     def handle_indicator(self, indicator):
@@ -301,7 +301,7 @@ class RequestManager:
     def _update_headers_if_expired(self):
         if self._get_timestamp() > self.headers_expiration_time:
             access_token = self._get_access_token(
-                config.ms_auth[TENANT],
+                config.ms_auth[TENANT_ID],
                 config.ms_auth[CLIENT_ID],
                 config.ms_auth[CLIENT_SECRET],
                 config.ms_auth[SCOPE])
