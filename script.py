@@ -79,7 +79,7 @@ def _handle_tlp_level(parsed_event):
 
 
 def _get_misp_events_stix():
-    logger.info(f"Using the following values for MISP API call: domain: {config.misp_domain}")
+    logger.info("Using the following values for MISP API call: domain: %s", config.misp_domain)
     misp = PyMISP(config.misp_domain, config.misp_key, config.misp_verifycert, False)
     result_set = []
     logger.debug("Query MISP for events.")
@@ -96,7 +96,7 @@ def _get_misp_events_stix():
                 result = misp.search(controller='events', return_format='json', **config.misp_event_filters, limit=config.misp_event_limit_per_page, page=misp_page)
 
             if len(result) > 0:
-                logger.info("Received MISP events page {} with {} events".format(misp_page, len(result)))
+                logger.info("Received MISP events page %s with %s events", misp_page, len(result))
                 for event in result:
                     misp_event = RequestObject_Event(event["Event"], logger, config.misp_flatten_attributes)
                     try:
@@ -104,10 +104,10 @@ def _get_misp_events_stix():
                         parser.parse_misp_event(misp_event.event)
                         stix_objects = parser.stix_objects
                     except Exception as e:
-                        logger.error("Error when processing data in event {} from MISP {}. Most likely a MISP-STIX conversion problem.".format(misp_event.id, e))
+                        logger.error("Error when processing data in event %s from MISP %s. Most likely a MISP-STIX conversion problem.", misp_event.id, e)
                         continue
                     if config.write_parsed_eventid:
-                        logger.info("Processing event {} {}".format(event["Event"]["id"], event["Event"]["info"]))
+                        logger.info("Processing event %s %s", event["Event"]["id"], event["Event"]["info"])
                     for element in stix_objects:
                         if element.type in STIX_OBJECTS_API_ACCEPTED_TYPES and \
                                         element.id not in misp_object_ids:
@@ -128,48 +128,48 @@ def _get_misp_events_stix():
                                             date_object = datetime.fromisoformat(valid_until)
                                         if date_object > datetime.now():
                                             if config.verbose_log:
-                                                logger.debug("Add {} to list of objects to upload".format(misp_object.pattern))
+                                                logger.debug("Add %s to list of objects to upload", misp_object.pattern)
                                             misp_object_ids.append(misp_object.id)
                                             result_set.append(misp_object._get_dict())
                                         else:
-                                            logger.error("Skipping outdated indicator {} in event {}, valid_until: {}".format(misp_object.pattern, misp_event.id, valid_until))
+                                            logger.error("Skipping outdated indicator %s in event %s, valid_until: %s", misp_object.pattern, misp_event.id, valid_until)
                                     else:
-                                        logger.error("Skipping indicator because valid_until was not set by MISP/MISP2Sentinel {}".format(misp_object.id))
+                                        logger.error("Skipping indicator because valid_until was not set by MISP/MISP2Sentinel %s", misp_object.id)
                                 else:
-                                    logger.error("Unable to process indicator. Invalid indicator type or invalid valid_until date. Event {}".format(misp_event.id))
+                                    logger.error("Unable to process indicator. Invalid indicator type or invalid valid_until date. Event %s", misp_event.id)
                             
                             elif element.type == 'threat-actor':
                                 misp_object = RequestObject_ThreatActor(element, misp_event, logger)
                                 if config.verbose_log:
-                                    logger.debug("Add threat-actor {} to list of objects to upload".format(misp_object.name))
+                                    logger.debug("Add threat-actor %s to list of objects to upload", misp_object.name)
                                 misp_object_ids.append(misp_object.id)
                                 result_set.append(misp_object._get_dict())
                             
                             elif element.type == 'identity':
                                 misp_object = RequestObject_Identity(element, misp_event, logger)
                                 if config.verbose_log:
-                                    logger.debug("Add identity {} to list of objects to upload".format(misp_object.name))
+                                    logger.debug("Add identity %s to list of objects to upload", misp_object.name)
                                 misp_object_ids.append(misp_object.id)
                                 result_set.append(misp_object._get_dict())
                             
                             elif element.type == 'relationship':
                                 misp_object = RequestObject_Relationship(element, misp_event, logger)
                                 if config.verbose_log:
-                                    logger.debug("Add relationship {} to list of objects to upload".format(misp_object.relationship_type))
+                                    logger.debug("Add relationship %s to list of objects to upload", misp_object.relationship_type)
                                 misp_object_ids.append(misp_object.id)
                                 result_set.append(misp_object._get_dict())
                 
-                logger.info("Processed {} STIX objects".format(len(result_set)))
+                logger.info("Processed %s STIX objects", len(result_set))
                 misp_page += 1
             else:
                 remaining_misp_pages = False
 
         except exceptions.MISPServerError as e:
             remaining_misp_pages = False
-            logger.error("Error received from the MISP server {} - {} - {}".format(e, sys.exc_info()[2].tb_lineno, sys.exc_info()[1]))
+            logger.error("Error received from the MISP server %s - %s - %s", e, sys.exc_info()[2].tb_lineno, sys.exc_info()[1])
         except Exception as e:
             remaining_misp_pages = False
-            logger.error("Error when processing data from MISP {} - {} - {}".format(e, sys.exc_info()[2].tb_lineno, sys.exc_info()[1]))
+            logger.error("Error when processing data from MISP %s - %s - %s", e, sys.exc_info()[2].tb_lineno, sys.exc_info()[1])
 
     return result_set, len(result_set)
 
@@ -248,7 +248,7 @@ def main():
     logger.info("Fetching and parsing data from MISP ...")
     logger.info("Using Microsoft Sentinel STIX Objects API")
     parsed_indicators, total_indicators = _get_misp_events_stix()
-    logger.info("Received {} STIX objects in MISP".format(total_indicators))
+    logger.info("Received %s STIX objects in MISP", total_indicators)
 
     if config.dry_run:
         logger.info("Dry run. Not uploading to Sentinel")

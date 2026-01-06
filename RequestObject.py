@@ -311,6 +311,11 @@ class RequestObject_Relationship:
         for el in element:
             setattr(self, el, element[el])
         
+        # Ensure required attributes are set (for linters)
+        # These will be overwritten by setattr above if present in element
+        if not hasattr(self, 'relationship_type'):
+            self.relationship_type = element.get('relationship_type', '')
+        
         # Add reference to MISP event
         if not hasattr(self, "external_references"):
             self.external_references = []
