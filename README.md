@@ -6,7 +6,12 @@ The MISP to Microsoft Sentinel integration allows you to upload threat intellige
 
 ### STIX Objects API
 
-The integration uses the [Microsoft Sentinel STIX Objects API](https://learn.microsoft.com/en-us/azure/sentinel/stix-objects-api) to upload threat intelligence in native STIX 2.1 format.
+The integration uses the [Microsoft Sentinel STIX Objects API](https://learn.microsoft.com/en-us/azure/sentinel/stix-objects-api) to upload threat intelligence in STIX 2.0/2.1 format.
+
+**Request Format:**
+The API accepts a JSON object with:
+- `sourcesystem` (required): Identifies the source system (set to "MISP")
+- `stixobjects` (required): An array of individual STIX objects in STIX 2.0 or 2.1 format
 
 **Supported STIX Object Types:**
 - **Indicators** - IOCs with STIX patterns
@@ -464,7 +469,7 @@ The integration workflow is as follows:
     - It takes into account the upload limits. If it needs to wait a message is logged with `Pausing upload for API request limit {}`.    
   - It starts processing all STIX objects
     - Uploads are done in batches of `config.ms_max_indicators_request` objects
-    - Objects are packaged into STIX bundles
+    - Objects are formatted into the required request body with `sourcesystem` and `stixobjects` fields
     - A POST request is done to the Microsoft Sentinel STIX Objects API
       - If the HTTP status code is not 200, or if the "error" key is in the response then something went wrong. This is logged with `Error when submitting STIX objects. {}`.
         - An error indicates the Azure App does not have sufficient permissions, or that something on the receiving (Sentinel) side is not OK.

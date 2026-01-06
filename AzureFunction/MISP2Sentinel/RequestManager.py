@@ -9,7 +9,6 @@ from MISP2Sentinel.constants import *
 import time
 import sys
 import logging
-import uuid
 
 
 class RequestManager:
@@ -220,26 +219,26 @@ class RequestManager:
             
             self._update_headers_if_expired()
             
-            # Prepare STIX bundle for upload
+            # Prepare STIX objects for upload
+            # The STIX Objects API expects individual objects, not a bundle
             batch = parsed_indicators[:config.ms_max_indicators_request]
-            stix_bundle = {
-                "type": "bundle",
-                "id": f"bundle--{uuid.uuid4()}",
-                "objects": batch
+            request_body = {
+                "sourcesystem": config.sourcesystem,
+                "stixobjects": batch
             }
             
             workspace_id = config.sentinel_workspace_id
             request_url = f"{config.sentinel_api_endpoint}/{workspace_id}/threatintelligence/stixobjects:upload?api-version=2024-02-01"
             
             if config.verbose_log:
-                self.logger.debug(f"Uploading STIX bundle to: {request_url}")
+                self.logger.debug(f"Uploading {len(batch)} STIX objects to: {request_url}")
             
             # Setting result retry as true to enter the loop
             result = {"retry": True, "breakRun": False}
 
             while result.get("retry", True):
-                response = requests.post(request_url, headers=self.headers, json=stix_bundle)
-                result = self.handle_response_codes(response, safe_margin, requests_number, stix_bundle, parsed_indicators)
+                response = requests.post(request_url, headers=self.headers, json=request_body)
+                result = self.handle_response_codes(response, safe_margin, requests_number, request_body, parsed_indicators)
                 # If retry is true, retry the request, otherwise continue to the next indicator
                 if result.get("retry", False):
                     requests_number += 1
@@ -281,7 +280,7 @@ class RequestManager:
             return {"retry": False, "breakRun": True}
         else:
             parsed_indicators = parsed_indicators[config.ms_max_indicators_request:]
-            batch_size = len(request_body.get("objects", request_body.get("value", [])))
+            batch_size = len(request_body.get("stixobjects", []))
             self.logger.info(
                 "STIX objects sent - request number: {} / objects: {} / remaining: {}".format(requests_number, batch_size, len(parsed_indicators)))
             return {"retry": False, "breakRun": False, "parsed_indicators": parsed_indicators}
