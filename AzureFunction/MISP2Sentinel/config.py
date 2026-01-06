@@ -24,7 +24,7 @@ ms_auth = {
 }
 
 # Sentinel STIX Objects API
-sentinel_api_endpoint = os.getenv('sentinel_api_endpoint', 'https://api.ti.sentinel.azure.com')
+sentinel_api_endpoint = os.getenv('sentinel_api_endpoint', 'https://sentinelus.azure-api.net')
 sentinel_workspace_id = workspace_id
 
 ## If Azure Key Vault name variable is set, use it for secret values

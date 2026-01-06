@@ -31,12 +31,13 @@ ms_auth = {
 }
 
 # Sentinel STIX Objects API
-# Note: The endpoint may vary by region. Use the appropriate endpoint for your deployment.
-# Common endpoints:
+# Note: The endpoint varies by region. Use the appropriate endpoint for your deployment.
+# Regional endpoints:
+#   - US: https://sentinelus.azure-api.net
 #   - Global: https://api.ti.sentinel.azure.com
-#   - US: https://sentinelus.azure-api.net (for legacy Upload Indicators API compatibility)
-# For STIX Objects API, use: https://api.ti.sentinel.azure.com
-sentinel_api_endpoint = "https://api.ti.sentinel.azure.com"
+# If you were previously using sentinelus.azure-api.net for Upload Indicators API,
+# continue using it for STIX Objects API with the updated path.
+sentinel_api_endpoint = "https://sentinelus.azure-api.net"
 sentinel_workspace_id = "<workspace-id>"
 
 ms_max_indicators_request = 100     # STIX Objects API: Throttle max: 100 indicators per request

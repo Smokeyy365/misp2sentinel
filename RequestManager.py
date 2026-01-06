@@ -231,6 +231,9 @@ class RequestManager:
             workspace_id = config.sentinel_workspace_id
             request_url = f"{config.sentinel_api_endpoint}/{workspace_id}/threatintelligence/stixobjects:upload?api-version=2024-02-01"
             
+            if config.verbose_log:
+                self.logger.debug(f"Uploading STIX bundle to: {request_url}")
+            
             # Setting result retry as true to enter the loop
             result = {"retry": True, "breakRun": False}
 
