@@ -270,23 +270,29 @@ class RequestManager:
         return {"retry": True, "breakRun": False, "parsed_indicators": parsed_indicators}
     
     def handle_success_response(self, response, request_body, parsed_indicators, requests_number):
-        response_json = response.json()
-        if "errors" in response_json and len(response_json["errors"]) > 0:
-            if config.sentinel_write_response:
-                json_formatted_str = json.dumps(response_json, indent=4)
-                with open("sentinel_response.txt", "a") as fp:
-                    fp.write(json_formatted_str)
-            self.logger.error("Error when submitting STIX objects - error string received from Sentinel. {}".format(response.text))
-            return {"retry": False, "breakRun": True}
-        else:
-            parsed_indicators = parsed_indicators[config.ms_max_indicators_request:]
-            batch_size = len(request_body.get("stixobjects", []))
-            self.logger.info(
-                "STIX objects sent - request number: {} / objects: {} / remaining: {}".format(requests_number, batch_size, len(parsed_indicators)))
-            return {"retry": False, "breakRun": False, "parsed_indicators": parsed_indicators}
+        # Try to parse JSON response, but handle empty responses gracefully
+        try:
+            response_json = response.json()
+            if "errors" in response_json and len(response_json["errors"]) > 0:
+                if config.sentinel_write_response:
+                    json_formatted_str = json.dumps(response_json, indent=4)
+                    with open("sentinel_response.txt", "a") as fp:
+                        fp.write(json_formatted_str)
+                self.logger.error("Error when submitting STIX objects - error string received from Sentinel. %s", response.text)
+                return {"retry": False, "breakRun": True}
+        except (json.JSONDecodeError, ValueError):
+            # Empty or non-JSON response is acceptable for successful uploads
+            self.logger.debug("Response body is empty or not JSON (this is normal for successful uploads)")
+        
+        # Success case - continue processing
+        parsed_indicators = parsed_indicators[config.ms_max_indicators_request:]
+        batch_size = len(request_body.get("stixobjects", []))
+        self.logger.info(
+            "STIX objects sent - request number: %s / objects: %s / remaining: %s", requests_number, batch_size, len(parsed_indicators))
+        return {"retry": False, "breakRun": False, "parsed_indicators": parsed_indicators}
 
     def handle_error_response(self, response):
-        self.logger.error("Error when submitting STIX objects. Non HTTP-200 response. {}".format(response.text))
+        self.logger.error("Error when submitting STIX objects. Non HTTP-200 response. %s", response.text)
         return {"retry": False, "breakRun": True}
     
     def handle_indicator(self, indicator):
