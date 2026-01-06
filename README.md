@@ -108,9 +108,16 @@ ms_auth = {
 }
 
 # Sentinel STIX Objects API
+# Note: The endpoint may vary by region or deployment. 
+# Default is the global endpoint for STIX Objects API.
 sentinel_api_endpoint = "https://api.ti.sentinel.azure.com"
 sentinel_workspace_id = "<workspace-id>"
 ```
+
+**Important**: The STIX Objects API endpoint is `https://api.ti.sentinel.azure.com`, which is different from the legacy Upload Indicators API endpoint (`https://sentinelus.azure-api.net`). If you encounter 404 errors, verify:
+1. You are using the correct endpoint for the STIX Objects API
+2. Your workspace ID is correct
+3. The Azure App has Microsoft Sentinel Contributor permissions
 
 - `ms_max_indicators_request = 100`: Throttling limits for the API. Maximum STIX objects that can be sent per request. Max. 100.
 - `ms_max_requests_minute = 100`: Throttling limits for the API. Maximum requests per minute. Max. 100.
@@ -549,6 +556,22 @@ You can control the list of tags that get synchronised with variables in the `co
 ### Error: KeyError: 'access_token'
 
 This error occurs when the client_id, tenant_id, client_secret or sentinel_workspace_id are invalid. Check the values in the Azure App.
+
+### Error: 404 Resource Not Found when uploading to Sentinel
+
+If you encounter a 404 error when uploading STIX objects, verify:
+
+1. **Endpoint URL**: Ensure you're using the correct STIX Objects API endpoint: `https://api.ti.sentinel.azure.com` (not the legacy Upload Indicators API endpoint `https://sentinelus.azure-api.net`)
+2. **Workspace ID**: Verify your `sentinel_workspace_id` is correct. Get it from the Log Analytics workspace Overview page
+3. **Permissions**: Ensure the Azure App has **Microsoft Sentinel Contributor** role assigned to the workspace
+4. **API Version**: The STIX Objects API uses `api-version=2024-02-01`
+
+The full URL format should be:
+```
+https://api.ti.sentinel.azure.com/{workspace_id}/threatintelligence/stixobjects:upload?api-version=2024-02-01
+```
+
+If you need to use a different endpoint (e.g., for specific regions or deployments), you can modify `sentinel_api_endpoint` in your configuration.
 
 ### Error: Unable to process indicator. Invalid indicator type or invalid valid_until date.
 

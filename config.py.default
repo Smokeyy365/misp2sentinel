@@ -31,6 +31,11 @@ ms_auth = {
 }
 
 # Sentinel STIX Objects API
+# Note: The endpoint may vary by region. Use the appropriate endpoint for your deployment.
+# Common endpoints:
+#   - Global: https://api.ti.sentinel.azure.com
+#   - US: https://sentinelus.azure-api.net (for legacy Upload Indicators API compatibility)
+# For STIX Objects API, use: https://api.ti.sentinel.azure.com
 sentinel_api_endpoint = "https://api.ti.sentinel.azure.com"
 sentinel_workspace_id = "<workspace-id>"
 
