@@ -95,7 +95,8 @@ def create_revoked_indicator(stix_id, pattern, pattern_type="stix", name=None):
     Returns:
         dict: STIX indicator object with revoked=true
     """
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    # Format timestamp as ISO 8601 with milliseconds precision
+    now = datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
     
     indicator = {
         "type": "indicator",
@@ -135,8 +136,11 @@ def upload_revoked_indicator(token, indicator):
         "Content-Type": "application/json"
     }
     
+    # Use sourcesystem from config, default to "MISP" if not set
+    sourcesystem = getattr(config, 'sourcesystem', 'MISP')
+    
     request_body = {
-        "sourcesystem": getattr(config, 'sourcesystem', 'MISP'),
+        "sourcesystem": sourcesystem,
         "stixobjects": [indicator]
     }
     
