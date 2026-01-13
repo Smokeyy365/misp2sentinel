@@ -484,6 +484,94 @@ The integration workflow is as follows:
 
 ![docs/base-MISP2Sentinel-workflow.png](docs/base-MISP2Sentinel-workflow.png)
 
+## Revoking Indicators
+
+The integration includes a utility script `revoke_indicator.py` that allows you to manually revoke indicators in Microsoft Sentinel.
+
+### When to Revoke Indicators
+
+You might want to revoke an indicator when:
+- An IOC was resolved or is no longer malicious in MISP
+- An indicator was uploaded by mistake
+- You need to immediately invalidate an indicator
+
+### How Revocation Works
+
+The script updates an existing indicator in Sentinel by:
+1. Re-uploading it with the same STIX ID
+2. Setting `revoked: true` in the STIX object
+3. Setting `valid_until` to the current timestamp (expires immediately)
+
+### Usage
+
+#### Interactive Mode
+
+Run without arguments for an interactive CLI:
+
+```bash
+python revoke_indicator.py
+```
+
+The script will prompt you for:
+- STIX ID (e.g., `indicator--12345678-1234-1234-1234-123456789abc`)
+- STIX Pattern (e.g., `[ipv4-addr:value = '1.2.3.4']`)
+- Optional: Indicator name
+- Optional: Pattern type (defaults to "stix")
+
+#### Command-Line Mode
+
+For automation or scripting:
+
+```bash
+python revoke_indicator.py \
+  --id "indicator--abc123..." \
+  --pattern "[ipv4-addr:value = '1.2.3.4']" \
+  --name "Malicious IP" \
+  --pattern-type "stix"
+```
+
+### Finding Indicator Information
+
+To revoke an indicator, you need its STIX ID and pattern. You can find this information by:
+
+1. **Query Log Analytics**: Use Kusto Query Language (KQL) in your Sentinel workspace:
+   ```kql
+   ThreatIntelligenceIndicator
+   | where IndicatorId contains "1.2.3.4"
+   | project TimeGenerated, IndicatorId, Description, ThreatType, ExpirationDateTime
+   ```
+
+2. **Check local logs**: If you have `write_parsed_indicators = True` in your config, review `parsed_indicators.txt`
+
+3. **MISP Event Conversion**: The STIX ID is deterministic based on the MISP attribute UUID:
+   - Format: `indicator--{uuid-from-misp}`
+   - You can construct it from the MISP attribute UUID
+
+### Example Workflow
+
+1. Identify the indicator to revoke (e.g., from MISP or Sentinel)
+2. Get the STIX ID and pattern
+3. Run the revocation script:
+   ```bash
+   python revoke_indicator.py
+   ```
+4. Enter the required information when prompted
+5. Confirm the revocation
+6. The indicator is marked as revoked in Sentinel
+
+### Important Notes
+
+- **Same ID Required**: The STIX ID must match exactly for Sentinel to update the existing indicator
+- **Immediate Effect**: Setting `revoked: true` and expiring the indicator makes it ineffective immediately
+- **No Query API**: The STIX Objects API doesn't provide querying functionality, so you must obtain indicator details from Log Analytics or local records
+- **Permanent Action**: Revoked indicators cannot be "un-revoked" - you would need to re-upload the original indicator
+
+### Configuration
+
+The script uses the same `config.py` as the main integration script. Ensure you have:
+- Valid Microsoft authentication credentials (`ms_auth`)
+- Correct `sentinel_api_endpoint` and `sentinel_workspace_id`
+
 ## FAQ
 
 ### I don't see my indicator in Sentinel
