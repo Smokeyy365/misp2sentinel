@@ -68,15 +68,18 @@ network_ignore_direction = True     # Graph API only
 
 default_confidence = 50             # Sentinel default confidence level of indicator
 
-days_to_expire = 50                 # Graph API and Upload Indicators
-days_to_expire_start = "current_date" # Upload Indicators API only. Start counting from "valid_from" | "current_date" ; 
-days_to_expire_mapping = {          # Upload indicators API only. Mapping for expiration of specific indicator types
+# Indicator expiration settings
+# By default, MISP's last_seen attribute (converted to valid_until) is used for indicator expiration
+# Set days_to_expire_ignore_misp_last_seen = True to override and calculate expiration from config
+days_to_expire = 50                 # Days to expire (used when days_to_expire_ignore_misp_last_seen = True or last_seen not set)
+days_to_expire_start = "current_date" # Start counting from "valid_from" | "current_date"
+days_to_expire_mapping = {          # Custom expiration per indicator type
                     "ipv4-addr": 180,
                     "ipv6-addr": 180,
                     "domain-name": 180,
                     "url": 365,
                 }
-                                    # Don't set an expiration date for files ('file')
+# days_to_expire_ignore_misp_last_seen = False  # Default: Use MISP's last_seen for expiration
 
 log_file = "/tmp/misp2sentinel.log"
 write_post_json = False             # Graph API only

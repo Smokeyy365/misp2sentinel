@@ -257,16 +257,20 @@ days_to_expire_mapping = {          # Mapping for expiration of specific indicat
                 }
 ```
 
-In MISP you can set the *first seen* and *last seen* of attributes. In the MISP-STIX conversion, last seen is translated to *valid_until*. This valid_until influences the expiration date of the indicator. If the expiration date (calculated with the above values) is after the current date, then it is ignored. In some cases it can be useful to ignore the last seen value set in MISP, and just use your own calculations of the expiration date. You can do this with `days_to_expire_ignore_misp_last_seen`. This ignores the last seen value, and calculates expiration date based on `days_to_expire` (and _mapping).
+In MISP you can set the *first seen* and *last seen* of attributes. In the MISP-STIX conversion, last seen is translated to *valid_until*. 
+
+**By default (recommended)**, the integration uses MISP's `last_seen` attribute to set the indicator expiration. This ensures indicators expire based on when they were last observed in MISP.
+
+If you want to **ignore MISP's last_seen** and calculate expiration dates based only on your config settings, set `days_to_expire_ignore_misp_last_seen = True`.
 
 In summary:
-- If valid_until is set in MISP
-	- Set expire to valid_until
-- Else
-  - If days_to_expire_start == current_date
-  	- Set expire to "now" + days from either days_to_expire or days_to_expire_mapping
-  - If days_to_expire_start == valid_from
-  	- Set expire to MISP valid_from + days from either days_to_expire or days_to_expire_mapping
+- If `days_to_expire_ignore_misp_last_seen = False` (default):
+	- Use MISP's `last_seen` (valid_until) if set
+	- Otherwise, calculate expiration based on `days_to_expire` and `days_to_expire_start`
+- If `days_to_expire_ignore_misp_last_seen = True`:
+	- Always calculate expiration based on `days_to_expire` and `days_to_expire_start`
+	- If days_to_expire_start == current_date: Set expire to "now" + days from either days_to_expire or days_to_expire_mapping
+	- If days_to_expire_start == valid_from: Set expire to MISP valid_from + days from either days_to_expire or days_to_expire_mapping
 
 **Script output**
 
@@ -365,7 +369,9 @@ For indicators:
 - Start counting from today if `days_to_expire_start` is "current_date" (or from the "valid_from" time)
 - If the end count date is beyond the date set in "valid_until", then discard the indicator
 
-The `valid_until` value is set in MISP with the `last_seen` of an attribute. Depending on your use case you might want to ignore the `last_seen` of an attribute, and consequently ignore the `valid_until` value. Do this by setting the configuration option `days_to_expire_ignore_misp_last_seen` to True.
+The `valid_until` value is set in MISP with the `last_seen` of an attribute. 
+
+**By default**, the integration uses MISP's `last_seen` attribute for indicator expiration. If you want to override this and calculate expiration dates based only on your config settings (ignoring MISP's `last_seen`), set the configuration option `days_to_expire_ignore_misp_last_seen` to True.
 
 ```python
 days_to_expire_ignore_misp_last_seen = True

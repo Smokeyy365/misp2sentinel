@@ -144,8 +144,14 @@ class RequestObject_Indicator:
                                             })
 
             date_object = False
-            # Set the valid_until if not set by MISP (never ; https://github.com/MISP/misp-stix/issues/1)
-            if config.days_to_expire_ignore_misp_last_seen or not self.valid_until:
+            # Use MISP's last_seen (valid_until) if available, unless configured to ignore it
+            # When days_to_expire_ignore_misp_last_seen=False (default), prefer MISP's last_seen
+            # When days_to_expire_ignore_misp_last_seen=True, always calculate expiration
+            if not config.days_to_expire_ignore_misp_last_seen and self.valid_until:
+                # Use MISP's last_seen attribute (already converted to valid_until by misp-stix)
+                logger.debug("Using MISP last_seen for valid_until: %s", self.valid_until)
+            else:
+                # Calculate expiration based on config settings
                 days_to_expire = config.days_to_expire
 
                 # If we have a mapping, then we use a custom number of days to expire
