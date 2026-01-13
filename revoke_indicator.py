@@ -82,7 +82,7 @@ def query_sentinel_indicators(token, search_term, search_type='name'):
     return []
 
 
-def create_revoked_indicator(stix_id, pattern, pattern_type="stix", name=None):
+def create_revoked_indicator(stix_id, pattern, pattern_type="stix", name=None, created=None, valid_from=None):
     """
     Create a STIX indicator object with revoked=true.
     
@@ -91,6 +91,8 @@ def create_revoked_indicator(stix_id, pattern, pattern_type="stix", name=None):
         pattern (str): The STIX pattern (e.g., "[ipv4-addr:value = '1.2.3.4']")
         pattern_type (str): Pattern type, default "stix"
         name (str): Optional name for the indicator
+        created (str): Original created timestamp (if known)
+        valid_from (str): Original valid_from timestamp (if known)
     
     Returns:
         dict: STIX indicator object with revoked=true
@@ -98,17 +100,24 @@ def create_revoked_indicator(stix_id, pattern, pattern_type="stix", name=None):
     # Format timestamp as ISO 8601 with milliseconds precision
     now = datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
     
+    # Use original created timestamp if provided, otherwise use now
+    # This is important: Sentinel may not update if created timestamp changes
+    created_time = created if created else now
+    
+    # Use original valid_from if provided, otherwise use now
+    valid_from_time = valid_from if valid_from else now
+    
     indicator = {
         "type": "indicator",
         "spec_version": "2.1",
         "id": stix_id,
-        "created": now,
-        "modified": now,
+        "created": created_time,
+        "modified": now,  # This should always be updated to now
         "revoked": True,
         "pattern": pattern,
         "pattern_type": pattern_type,
         "pattern_version": "2.1",
-        "valid_from": now,
+        "valid_from": valid_from_time,
         "valid_until": now  # Set to now to expire immediately
     }
     
@@ -190,6 +199,9 @@ def interactive_mode(token):
             print("To revoke an indicator, you need:")
             print("  - STIX ID (e.g., indicator--12345678-1234-1234-1234-123456789abc)")
             print("  - STIX Pattern (e.g., [ipv4-addr:value = '1.2.3.4'])")
+            print("\nOptional (helps ensure proper update):")
+            print("  - Original 'created' timestamp")
+            print("  - Original 'valid_from' timestamp")
             print("-"*60)
             
             stix_id = input("\nEnter STIX ID: ").strip()
@@ -210,9 +222,18 @@ def interactive_mode(token):
             
             name = input("Enter indicator name (optional, press Enter to skip): ").strip()
             pattern_type = input("Enter pattern type (default: stix, press Enter to use default): ").strip() or "stix"
+            created = input("Enter original 'created' timestamp (optional, ISO format, press Enter to skip): ").strip()
+            valid_from = input("Enter original 'valid_from' timestamp (optional, ISO format, press Enter to skip): ").strip()
             
             # Create the revoked indicator
-            indicator = create_revoked_indicator(stix_id, pattern, pattern_type, name if name else None)
+            indicator = create_revoked_indicator(
+                stix_id, 
+                pattern, 
+                pattern_type, 
+                name if name else None,
+                created if created else None,
+                valid_from if valid_from else None
+            )
             
             # Show preview
             print("\n" + "-"*60)
@@ -251,6 +272,8 @@ Examples:
     parser.add_argument('--pattern', help='STIX pattern of the indicator')
     parser.add_argument('--name', help='Name of the indicator (optional)')
     parser.add_argument('--pattern-type', default='stix', help='Pattern type (default: stix)')
+    parser.add_argument('--created', help='Original created timestamp (ISO format, optional)')
+    parser.add_argument('--valid-from', help='Original valid_from timestamp (ISO format, optional)')
     
     args = parser.parse_args()
     
@@ -266,7 +289,9 @@ Examples:
             args.stix_id,
             args.pattern,
             args.pattern_type,
-            args.name
+            args.name,
+            args.created,
+            args.valid_from
         )
         
         print("\nIndicator to be revoked:")
