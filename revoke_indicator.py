@@ -225,6 +225,29 @@ def interactive_mode(token):
             created = input("Enter original 'created' timestamp (optional, ISO format, press Enter to skip): ").strip()
             valid_from = input("Enter original 'valid_from' timestamp (optional, ISO format, press Enter to skip): ").strip()
             
+            # Validate timestamp format if provided
+            def validate_timestamp(ts_str, field_name):
+                if not ts_str:
+                    return True
+                try:
+                    # Try parsing as ISO format
+                    datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
+                    return True
+                except ValueError:
+                    print(f"WARNING: Invalid ISO timestamp format for {field_name}: {ts_str}")
+                    print("Expected format: YYYY-MM-DDTHH:MM:SS.sssZ (e.g., 2024-01-01T00:00:00.000Z)")
+                    return False
+            
+            if not validate_timestamp(created, "created"):
+                confirm = input("Continue with invalid timestamp? (y/n): ").strip().lower()
+                if confirm != 'y':
+                    continue
+            
+            if not validate_timestamp(valid_from, "valid_from"):
+                confirm = input("Continue with invalid timestamp? (y/n): ").strip().lower()
+                if confirm != 'y':
+                    continue
+            
             # Create the revoked indicator
             indicator = create_revoked_indicator(
                 stix_id, 

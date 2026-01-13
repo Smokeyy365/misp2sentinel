@@ -539,14 +539,16 @@ python revoke_indicator.py \
 
 To revoke an indicator, you need its STIX ID, pattern, and ideally the original timestamps. You can find this information by:
 
-1. **Query Log Analytics**: Use Kusto Query Language (KQL) in your Sentinel workspace:
+1. **Query Log Analytics**: Use Kusto Query Language (KQL) in your Sentinel workspace.
+   
+   Basic query to find indicators:
    ```kql
    ThreatIntelligenceIndicator
    | where IndicatorId contains "1.2.3.4"
-   | project TimeGenerated, IndicatorId, Description, ThreatType, ExpirationDateTime, AdditionalInformation
+   | project TimeGenerated, IndicatorId, Description, ThreatType, ExpirationDateTime
    ```
    
-   To get the full STIX object with timestamps:
+   To get the full STIX object details including timestamps (the `AdditionalInformation` field contains the raw STIX JSON):
    ```kql
    ThreatIntelligenceIndicator
    | where IndicatorId contains "1.2.3.4"
