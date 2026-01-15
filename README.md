@@ -497,13 +497,38 @@ You might want to revoke an indicator when:
 
 ### How Revocation Works
 
-The script updates an existing indicator in Sentinel by:
-1. Re-uploading it with the same STIX ID
-2. Setting `revoked: true` in the STIX object
+The script automatically queries Sentinel Log Analytics to retrieve the original indicator, then creates an updated version with:
+1. Setting `revoked` to `true`
+2. Updating `modified` timestamp to now
 3. Setting `valid_until` to the current timestamp (expires immediately)
-4. **Important**: Using the original `created` timestamp (if available) ensures Sentinel recognizes this as an update to the existing indicator
+4. **Preserving all other original fields** to ensure Sentinel recognizes this as an update
+
+### Prerequisites
+
+The service principal (Azure App) needs the **Log Analytics Reader** role on the Log Analytics workspace:
+
+1. Navigate to your Log Analytics Workspace in Azure Portal
+2. Select **Access control (IAM)**
+3. Select **Add** > **Add role assignment**
+4. Select **Log Analytics Reader** role > **Next**
+5. Select your service principal (the same app used for Sentinel integration)
+6. Select **Review + assign**
 
 ### Usage
+
+#### Simplified Command-Line Mode (Recommended)
+
+Simply provide the STIX ID - the script automatically queries and revokes:
+
+```bash
+python revoke_indicator.py --id "indicator--abc123..."
+```
+
+This will:
+1. Query Sentinel for the original indicator
+2. Preserve all original data
+3. Update only the revoked status and expiration
+4. Upload the updated indicator
 
 #### Interactive Mode
 
@@ -513,86 +538,76 @@ Run without arguments for an interactive CLI:
 python revoke_indicator.py
 ```
 
-The script will prompt you for:
-- STIX ID (e.g., `indicator--12345678-1234-1234-1234-123456789abc`)
-- STIX Pattern (e.g., `[ipv4-addr:value = '1.2.3.4']`)
-- Optional: Indicator name
-- Optional: Pattern type (defaults to "stix")
-- Optional: Original `created` timestamp (recommended for reliable updates)
-- Optional: Original `valid_from` timestamp
+You'll see two options:
+1. **Auto-revoke** (recommended): Provide only the STIX ID, script queries everything
+2. **Manual revoke**: Provide all indicator details manually
 
-#### Command-Line Mode
+#### Manual Mode (Fallback)
 
-For automation or scripting:
+If auto-query doesn't work or you don't have Log Analytics Reader permissions:
 
 ```bash
 python revoke_indicator.py \
   --id "indicator--abc123..." \
   --pattern "[ipv4-addr:value = '1.2.3.4']" \
-  --name "Malicious IP" \
-  --pattern-type "stix" \
+  --manual \
   --created "2024-01-01T00:00:00.000Z" \
   --valid-from "2024-01-01T00:00:00.000Z"
 ```
 
-### Finding Indicator Information
+### Finding the STIX ID
 
-To revoke an indicator, you need its STIX ID, pattern, and ideally the original timestamps. You can find this information by:
+You can find the STIX ID from Sentinel Log Analytics:
 
-1. **Query Log Analytics**: Use Kusto Query Language (KQL) in your Sentinel workspace.
-   
-   Basic query to find indicators:
-   ```kql
-   ThreatIntelligenceIndicator
-   | where IndicatorId contains "1.2.3.4"
-   | project TimeGenerated, IndicatorId, Description, ThreatType, ExpirationDateTime
-   ```
-   
-   To get the full STIX object details including timestamps (the `AdditionalInformation` field contains the raw STIX JSON):
-   ```kql
-   ThreatIntelligenceIndicator
-   | where IndicatorId contains "1.2.3.4"
-   | extend StixObject = parse_json(AdditionalInformation)
-   | project IndicatorId, 
-             StixId = tostring(StixObject.id),
-             Pattern = tostring(StixObject.pattern),
-             Created = tostring(StixObject.created),
-             ValidFrom = tostring(StixObject.valid_from)
-   ```
+```kql
+ThreatIntelligenceIndicator
+| where IndicatorId contains "1.2.3.4"  // or any search term
+| extend StixObject = parse_json(AdditionalInformation)
+| project TimeGenerated,
+          IndicatorId, 
+          StixId = tostring(StixObject.id),
+          Pattern = tostring(StixObject.pattern)
+| top 10 by TimeGenerated desc
+```
 
-2. **Check local logs**: If you have `write_parsed_indicators = True` in your config, review `parsed_indicators.txt`
-
-3. **MISP Event Conversion**: The STIX ID is deterministic based on the MISP attribute UUID:
-   - Format: `indicator--{uuid-from-misp}`
-   - You can construct it from the MISP attribute UUID
+The STIX ID format is: `indicator--{uuid}` (e.g., `indicator--12345678-1234-1234-1234-123456789abc`)
 
 ### Example Workflow
 
-1. Identify the indicator to revoke (e.g., from MISP or Sentinel)
-2. Get the STIX ID and pattern
-3. Run the revocation script:
-   ```bash
-   python revoke_indicator.py
-   ```
-4. Enter the required information when prompted
-5. Confirm the revocation
-6. The indicator is marked as revoked in Sentinel
+**Simple revocation (recommended):**
+1. Find the STIX ID from Log Analytics (query above)
+2. Run: `python revoke_indicator.py --id "indicator--abc123..."`
+3. Confirm the revocation
+4. The indicator is automatically queried and revoked
+
+**Verify revocation:**
+```kql
+ThreatIntelligenceIndicator
+| where IndicatorId == "indicator--abc123..."
+| extend StixObject = parse_json(AdditionalInformation)
+| project TimeGenerated, 
+          Revoked = StixObject.revoked,
+          ValidUntil = StixObject.valid_until
+| top 1 by TimeGenerated desc
+```
 
 ### Important Notes
 
-- **Same ID Required**: The STIX ID must match exactly for Sentinel to update the existing indicator
-- **Original Timestamps Recommended**: For Sentinel to properly recognize and update the indicator, use the original `created` and `valid_from` timestamps when available. Without these, Sentinel may create a new indicator instead of updating the existing one.
+### Important Notes
+
+- **Automatic Querying**: The auto-query mode requires Log Analytics Reader permissions on the workspace
+- **Same ID Preserved**: The original STIX ID is preserved to update the existing indicator
+- **All Data Preserved**: Original timestamps and all other fields are preserved automatically
+- **Immediate Effect**: Setting `revoked: true` and expiring the indicator makes it ineffective immediately
+- **Permanent Action**: Revoked indicators cannot be "un-revoked" - you would need to re-upload the original indicator with `revoked: false`
 - **Verification**: After revoking, query the ThreatIntelligenceIndicator table to verify:
   ```kql
   ThreatIntelligenceIndicator
   | where IndicatorId == "indicator--your-id"
   | extend StixObject = parse_json(AdditionalInformation)
-  | project TimeGenerated, StixObject.revoked, StixObject.valid_until, StixObject.modified
-  | order by TimeGenerated desc
+  | project TimeGenerated, Revoked = StixObject.revoked, ValidUntil = StixObject.valid_until
+  | top 1 by TimeGenerated desc
   ```
-- **Immediate Effect**: Setting `revoked: true` and expiring the indicator makes it ineffective immediately
-- **No Query API**: The STIX Objects API doesn't provide querying functionality, so you must obtain indicator details from Log Analytics or local records
-- **Permanent Action**: Revoked indicators cannot be "un-revoked" - you would need to re-upload the original indicator with `revoked: false`
 
 ### Configuration
 
