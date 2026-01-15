@@ -593,8 +593,6 @@ ThreatIntelligenceIndicator
 
 ### Important Notes
 
-### Important Notes
-
 - **Automatic Querying**: The auto-query mode requires Log Analytics Reader permissions on the workspace
 - **Same ID Preserved**: The original STIX ID is preserved to update the existing indicator
 - **All Data Preserved**: Original timestamps and all other fields are preserved automatically

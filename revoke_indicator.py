@@ -33,10 +33,14 @@ try:
     from azure.monitor.query import LogsQueryClient
     from azure.core.credentials import AccessToken
     from azure.core.exceptions import HttpResponseError
+    import copy
 except ImportError:
     print("ERROR: azure-monitor-query library not found.")
     print("Please install it: pip install azure-monitor-query")
     sys.exit(1)
+
+# Constants
+TOKEN_EXPIRY_HOURS = 1  # Access token expiration time
 
 
 class TokenCredential:
@@ -46,8 +50,7 @@ class TokenCredential:
     
     def get_token(self, *scopes, **kwargs):
         """Return the access token."""
-        # Tokens typically expire in 1 hour
-        expires_on = int((datetime.now(timezone.utc) + timedelta(hours=1)).timestamp())
+        expires_on = int((datetime.now(timezone.utc) + timedelta(hours=TOKEN_EXPIRY_HOURS)).timestamp())
         return AccessToken(self.token, expires_on)
 
 
@@ -94,6 +97,16 @@ def query_indicator_from_sentinel(stix_id):
     """
     print(f"\nQuerying Sentinel for indicator: {stix_id}")
     
+    # Validate and sanitize STIX ID to prevent injection
+    if not stix_id or not isinstance(stix_id, str):
+        print("ERROR: Invalid STIX ID")
+        return None
+    
+    # STIX IDs should follow the format: indicator--<uuid>
+    # This validation helps prevent KQL injection
+    if not stix_id.startswith("indicator--") or len(stix_id) < 47:
+        print("WARNING: STIX ID format appears invalid")
+    
     # Get Log Analytics access token (different scope than Sentinel API)
     la_token = get_access_token("https://api.loganalytics.io/.default")
     
@@ -101,12 +114,16 @@ def query_indicator_from_sentinel(stix_id):
     credential = TokenCredential(la_token)
     client = LogsQueryClient(credential)
     
+    # Escape single quotes in the STIX ID for KQL
+    escaped_stix_id = stix_id.replace("'", "''")
+    
     # KQL query to find the indicator
+    # Using exact string matching with escaped input to prevent injection
     query = f"""
     ThreatIntelligenceIndicator
     | where TimeGenerated > ago(90d)
     | extend StixObject = parse_json(AdditionalInformation)
-    | where tostring(StixObject.id) == "{stix_id}"
+    | where tostring(StixObject.id) == '{escaped_stix_id}'
     | top 1 by TimeGenerated desc
     | project StixObject
     """
@@ -162,8 +179,8 @@ def create_revoked_indicator_from_original(original_indicator):
     # Format timestamp as ISO 8601 with milliseconds precision
     now = datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
     
-    # Create a copy of the original indicator
-    revoked_indicator = original_indicator.copy()
+    # Create a deep copy of the original indicator to handle nested structures
+    revoked_indicator = copy.deepcopy(original_indicator)
     
     # Update only the fields needed for revocation
     revoked_indicator["modified"] = now  # Update modified timestamp
