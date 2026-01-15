@@ -24,21 +24,24 @@ keyVaultName = "<unique-name>"
 # Microsoft section
 #
 ms_auth = {
-    'tenant': '<tenant>',
+    'tenant_id': '<tenant>',
     'client_id': '<client_id>',
     'client_secret': '<client_secret>',
-    'graph_api': False,                                 # Set to False to use Upload Indicators API   
-    #'scope': 'https://graph.microsoft.com/.default',   # Scope for GraphAPI
-    'scope': 'https://management.azure.com/.default',   # Scope for Upload Indicators API
-    'workspace_id': '<workspace_id>'
+    'scope': 'https://sentinel.azure.com/.default'   # Scope for STIX Objects API
 }
 
-ms_passiveonly = False              # Graph API only
-ms_action = 'alert'                 # Graph API only
+# Sentinel STIX Objects API
+# Note: The endpoint varies by region. Use the appropriate endpoint for your deployment.
+# Regional endpoints:
+#   - US: https://sentinelus.azure-api.net
+#   - Global: https://api.ti.sentinel.azure.com
+# If you were previously using sentinelus.azure-api.net for Upload Indicators API,
+# continue using it for STIX Objects API with the updated path.
+sentinel_api_endpoint = "https://sentinelus.azure-api.net"
+sentinel_workspace_id = "<workspace-id>"
 
-ms_api_version = "2022-07-01"       # Upload Indicators API version
-ms_max_indicators_request = 100     # Upload Indicators API: Throttle max: 100 indicators per request
-ms_max_requests_minute = 100        # Upload Indicators API: Throttle max: 100 requests per minute
+ms_max_indicators_request = 100     # STIX Objects API: Throttle max: 100 indicators per request
+ms_max_requests_minute = 100        # STIX Objects API: Throttle max: 100 requests per minute
 
 
 ####
@@ -65,15 +68,18 @@ network_ignore_direction = True     # Graph API only
 
 default_confidence = 50             # Sentinel default confidence level of indicator
 
-days_to_expire = 50                 # Graph API and Upload Indicators
-days_to_expire_start = "current_date" # Upload Indicators API only. Start counting from "valid_from" | "current_date" ; 
-days_to_expire_mapping = {          # Upload indicators API only. Mapping for expiration of specific indicator types
+# Indicator expiration settings
+# By default, MISP's last_seen attribute (converted to valid_until) is used for indicator expiration
+# Set days_to_expire_ignore_misp_last_seen = True to override and calculate expiration from config
+days_to_expire = 50                 # Days to expire (used when days_to_expire_ignore_misp_last_seen = True or last_seen not set)
+days_to_expire_start = "current_date" # Start counting from "valid_from" | "current_date"
+days_to_expire_mapping = {          # Custom expiration per indicator type
                     "ipv4-addr": 180,
                     "ipv6-addr": 180,
                     "domain-name": 180,
                     "url": 365,
                 }
-                                    # Don't set an expiration date for files ('file')
+# days_to_expire_ignore_misp_last_seen = False  # Default: Use MISP's last_seen for expiration
 
 log_file = "/tmp/misp2sentinel.log"
 write_post_json = False             # Graph API only

@@ -2,6 +2,7 @@ asn1crypto
 attrs
 azure-keyvault-secrets
 azure-identity
+azure-monitor-query
 certifi
 charset-normalizer
 colorama

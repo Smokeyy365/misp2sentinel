@@ -2,15 +2,22 @@
 
 ## Introduction
 
-The MISP to Microsoft Sentinel integration allows you to upload indicators from MISP to Microsoft Sentinel. It relies on **PyMISP** to get indicators from MISP and an **Azure App** to connect to Sentinel. 
+The MISP to Microsoft Sentinel integration allows you to upload threat intelligence from MISP to Microsoft Sentinel. It relies on **PyMISP** to get data from MISP and an **Azure App** to connect to Sentinel. 
 
-### Upload Indicators API and Graph API
+### STIX Objects API
 
-The integration supports two methods for sending threat intelligence from MISP to Microsoft Sentinel:
+The integration uses the [Microsoft Sentinel STIX Objects API](https://learn.microsoft.com/en-us/azure/sentinel/stix-objects-api) to upload threat intelligence in STIX 2.0/2.1 format.
 
-- The recommend [Upload Indicators API](https://learn.microsoft.com/en-us/azure/sentinel/connect-threat-intelligence-upload-api), or
-- The [deprecated](https://learn.microsoft.com/en-us/graph/migrate-azure-ad-graph-overview) Microsoft Graph API. To facilitate the transition the integration supports both APIs.
+**Request Format:**
+The API accepts a JSON object with:
+- `sourcesystem` (required): Identifies the source system (set to "MISP")
+- `stixobjects` (required): An array of individual STIX objects in STIX 2.0 or 2.1 format
 
+**Supported STIX Object Types:**
+- **Indicators** - IOCs with STIX patterns
+- **Threat Actors** - Adversary information from MISP
+- **Identities** - Victim/target or creator information
+- **Relationships** - Links between objects (e.g., `threat-actor` → `attributed-to` → `identity`, `indicator` → `indicates` → `threat-actor`)
 
 ### STIX
 
@@ -95,28 +102,39 @@ If you do not set the above value, the config.py will then fall-back to using en
 
 ### Microsoft settings
 
-Define the Microsoft authentication settings in **ms_auth**. The `tenant` (Directory ID), `client_id` (Application client ID), and `client_secret` (secret client value) are the values you obtained when setting up the Azure App. Set `graph_api` to False, choose as `scope` 'https://management.azure.com/.default' and set the workspace ID in `workspace_id`.
+Define the Microsoft authentication settings in **ms_auth**. The `tenant_id` (Directory ID), `client_id` (Application client ID), and `client_secret` (secret client value) are the values you obtained when setting up the Azure App. The `scope` should be set to `https://sentinel.azure.com/.default` for the STIX Objects API.
   
-```
+```python
 ms_auth = {
-    'tenant': '<tenant>',
+    'tenant_id': '<tenant>',
     'client_id': '<client_id>',
     'client_secret': '<client_secret>',
-    'graph_api': False,                                # Set to False to use Upload Indicators API    
-    #'scope': 'https://graph.microsoft.com/.default',  # Scope for GraphAPI
-    'scope': 'https://management.azure.com/.default',  # Scope for Upload Indicators API
-    'workspace_id': '<workspace_id>'
+    'scope': 'https://sentinel.azure.com/.default'   # Scope for STIX Objects API
 }
+
+# Sentinel STIX Objects API
+# Important: Use the same regional endpoint you were using before
+# Regional endpoints:
+#   - US: https://sentinelus.azure-api.net
+#   - Global: https://api.ti.sentinel.azure.com
+sentinel_api_endpoint = "https://sentinelus.azure-api.net"  # Use your region's endpoint
+sentinel_workspace_id = "<workspace-id>"
 ```
 
-- `ms_api_version = "2022-07-01"`: The API version. Leave this to "2022-07-01".
-- `ms_max_indicators_request = 100`: Throttling limits for the API. Maximum indicators that can be send per request. Max. 100.
+**Important - Regional Endpoints**: 
+- If you were previously using `https://sentinelus.azure-api.net` for the Upload Indicators API, **continue using the same base endpoint** for the STIX Objects API.
+- The STIX Objects API uses the path `/threatintelligence/stixobjects:upload` instead of `/threatintelligence:upload-indicators`
+- Only the path changes, not the base endpoint domain
+- Common regional endpoints:
+  - **US**: `https://sentinelus.azure-api.net`
+  - **Global**: `https://api.ti.sentinel.azure.com`
+
+- `ms_max_indicators_request = 100`: Throttling limits for the API. Maximum STIX objects that can be sent per request. Max. 100.
 - `ms_max_requests_minute = 100`: Throttling limits for the API. Maximum requests per minute. Max. 100.
 
-```
-ms_api_version = "2022-07-01"       # Upload Indicators API version
-ms_max_indicators_request = 100     # Upload Indicators API: Throttle max: 100 indicators per request
-ms_max_requests_minute = 100        # Upload Indicators API: Throttle max: 100 requests per minute
+```python
+ms_max_indicators_request = 100     # STIX Objects API: Throttle max: 100 objects per request
+ms_max_requests_minute = 100        # STIX Objects API: Throttle max: 100 requests per minute
 ```
 
 ### MISP settings
@@ -138,7 +156,7 @@ The dictionary `misp_event_filters` defines which filters you want to pass on to
 
 Although it might be tempting keep the `publish_timestamp` to 14 days, it's better to only use the 14 (or higher) days for the initial run. Afterwards **set the publish_timestamp to a value that's equal to the frequency you synchronise** with Sentinel. Meaning, if you sync every 12 hours, set the publish_timestamp to 12h. It has no additional value to search for older events, as these have already been published previously.
 
-There's one MISP filter commonly used that does not have an impact for this integration: **to_ids**. In MISP `to_ids` defines if an indicator is *actionable* or not. Unfortunately the REST API only supports the to_ids filter when querying for attributes. This integration queries for events. Does this mean that indicators with to_ids set to False are uploaded? No. In the Graph API version, only attributes with to_ids set to True are used. The Upload Indicators API relies on the MISP-STIX conversion of attributes (and objects). This conversion checks for the to_ids flag for indicators, the only exception being attributes part of an object (also see [#48](https://github.com/MISP/misp-stix/issues/48)).
+There's one MISP filter commonly used that does not have an impact for this integration: **to_ids**. In MISP `to_ids` defines if an indicator is *actionable* or not. Unfortunately the REST API only supports the to_ids filter when querying for attributes. This integration queries for events. Does this mean that indicators with to_ids set to False are uploaded? No. The STIX Objects API relies on the MISP-STIX conversion of attributes (and objects). This conversion checks for the to_ids flag for indicators, the only exception being attributes part of an object (also see [#48](https://github.com/MISP/misp-stix/issues/48)).
 
 ```
 misp_event_filters = {
@@ -150,7 +168,7 @@ misp_event_filters = {
 }
 ```
 
-There's one additional setting for the Upload Indicators API and that's `misp_event_limit_per_page`. This setting defines how many events per search query are processed. Use this setting to limit the memory usage of the integration.
+There's one additional setting `misp_event_limit_per_page`. This setting defines how many events per search query are processed. Use this setting to limit the memory usage of the integration.
 
 - `misp_event_limit_per_page = 50`
 
@@ -203,21 +221,17 @@ retrieved_clientsecret = client.get_secret('ClientSecret')
 
 The remainder of the settings deal with how the integration is handled.
 
-**Ignore local tags and network destination**
-
-These settings only apply for the Graph API:
+**Ignore local tags**
 
 - `ignore_localtags = True `: When converting tags from MISP to Sentinel, ignore the MISP local tags (this applies to tags on event and attribute level).
-- `network_ignore_direction = True`: When set to true, not only store the indicator in the "Source/Destination" field of Sentinel (`networkDestinationIPv4, networkDestinationIPv6 or networkSourceIPv4, networkSourceIPv6`), also map in the fields without network context (`networkIPv4,networkIPv6`).
 
-```
-ignore_localtags = True             
-network_ignore_direction = True     # Graph API only
+```python
+ignore_localtags = True
 ```
 
 **Indicator confidence level**
 
-- `default_confidence = 50`: The default confidence level of indicators. This is a value between 0 and 100 and is used by both the Graph API and Upload Indicators API. You can set a confidence level per indicator, but if you don't set one then this default value is used.
+- `default_confidence = 50`: The default confidence level of indicators. This is a value between 0 and 100. You can set a confidence level per indicator, but if you don't set one then this default value is used.
   - This value is **overridden** when an attribute is tagged with the *MISP confidence level* ([MISP taxonomy](https://www.misp-project.org/taxonomies.html#_misp)). The tag is translated to a numerical confidence value (defined in `MISP_CONFIDENCE` in `constants.py`). It's possible to have more fine-grained confidence levels by adjusting the MISP taxonomy and simply adding entries to the predicate 'confidence-level'.
 
 ![docs/Taxonomies_-_MISP.png](docs/Taxonomies_-_MISP.png)
@@ -228,20 +242,14 @@ default_confidence = 50             # Sentinel default confidence level of indic
 
 **Days to expire indicator**
 
-These settings apply to both the Graph API and Upload Indicators API.
-
-- `days_to_expire = 50`: The default number of days after which an indictor in Sentinel will expire. 
-
-For the Graph API the date is calculated based on the timestamp when the script is executed. 
-
-The expiration of indicators works slightly different for the Upload Indicators API. There are two additional settings that apply for this API:
+- `days_to_expire = 50`: The default number of days after which an indicator in Sentinel will expire.
 - `days_to_expire_start`: Define if you want to start counting the "expiration" date (defined in `days_to_expire`) from the current date (with `current_date`) or from the value specified by MISP (with `valid_from`).
 - `days_to_expire_mapping`: Is a dictionary mapping specific expiration dates for indicators (STIX patterns). The numerical value is in days. This value overrides `days_to_expire`.
 
-```
-days_to_expire = 50                 # Graph API and Upload Indicators
-days_to_expire_start = "current_date" # Upload Indicators API only. Start counting from "valid_from" | "current_date" ; 
-days_to_expire_mapping = {          # Upload indicators API only. Mapping for expiration of specific indicator types
+```python
+days_to_expire = 50
+days_to_expire_start = "current_date" # Start counting from "valid_from" | "current_date"
+days_to_expire_mapping = {          # Mapping for expiration of specific indicator types
                     "ipv4-addr": 150,
                     "ipv6-addr": 150,
                     "domain-name": 300,
@@ -249,30 +257,33 @@ days_to_expire_mapping = {          # Upload indicators API only. Mapping for ex
                 }
 ```
 
-In MISP you can set the *first seen* and *last seen* of attributes. In the MISP-STIX conversion, last seen is translated to *valid_until*. This valid_until influences the expiration date of the indicator. If the expiration date (calculated with the above values) is after the current date, then it is ignored. In some cases it can be useful to ignore the last seen value set in MISP, and just use your own calculations of the expiration date. You can do this with `days_to_expire_ignore_misp_last_seen`. This ignores the last seen value, and calculates expiration date based on `days_to_expire` (and _mapping).
+In MISP you can set the *first seen* and *last seen* of attributes. In the MISP-STIX conversion, last seen is translated to *valid_until*. 
 
-In summary. 
-- If valid_until is set in MISP
-	- Set expire to valid_until
-- Else
-  - If days_to_expire_start == current_date
-  	- Set expire to "now" + days from either days_to_expire or days_to_expire_mapping
-  - If days_to_expire_start == valid_from
-  	- Set expire to MISP valid _ from + days from either days_to_expire or days_to_expire_mapping
+**By default (recommended)**, the integration uses MISP's `last_seen` attribute to set the indicator expiration. This ensures indicators expire based on when they were last observed in MISP.
+
+If you want to **ignore MISP's last_seen** and calculate expiration dates based only on your config settings, set `days_to_expire_ignore_misp_last_seen = True`.
+
+In summary:
+- If `days_to_expire_ignore_misp_last_seen = False` (default):
+	- Use MISP's `last_seen` (valid_until) if set
+	- Otherwise, calculate expiration based on `days_to_expire` and `days_to_expire_start`
+- If `days_to_expire_ignore_misp_last_seen = True`:
+	- Always calculate expiration based on `days_to_expire` and `days_to_expire_start`
+	- If days_to_expire_start == current_date: Set expire to "now" + days from either days_to_expire or days_to_expire_mapping
+	- If days_to_expire_start == valid_from: Set expire to MISP valid_from + days from either days_to_expire or days_to_expire_mapping
 
 **Script output**
 
 This version of MISP2Sentinel writes its output to a log file (defined in `log_file`).
 
-If you're using the Graph API you can output the POST JSON to a log file with `write_post_json = True`. A similar option exist for the Upload Indicators API. With `write_parsed_indicators = True` it will output the parsed value of the indicators to a local file.
+With `write_parsed_indicators = True` it will output the parsed value of the STIX objects to a local file.
 
 With `verbose_log = True` you can increase the verbosity setting of the log output.
 
-```
+```python
 log_file = "/tmp/misp2sentinel.log"
-write_post_json = False             # Graph API only
 verbose_log = False
-write_parsed_indicators = False      # Upload Indicators only
+write_parsed_indicators = False
 ```
 
 **Whitelisted URLS**
@@ -299,17 +310,24 @@ To make the most of the Sentinel integration you have to enable these MISP taxon
 - [MISP taxonomy](https://www.misp-project.org/taxonomies.html#_misp)
 - [sentinel-threattype](https://www.misp-project.org/taxonomies.html#_sentinel_threattype)
 - [kill-chain](https://www.misp-project.org/taxonomies.html#_kill_chain)
-- [diamond-model](https://www.misp-project.org/taxonomies.html#_diamond_model) *(only used with Graph API)*
 
-These taxonomies are used to provide additional **context** to the synchronised indicators and are strictly not necessary for the well-functioning of the integration. But they provide useful information for Sentinel users to understand what the threat is about and which follow-up actions need to be taken. 
+These taxonomies are used to provide additional **context** to the synchronised indicators and are strictly not necessary for the well-functioning of the integration. But they provide useful information for Sentinel users to understand what the threat is about and which follow-up actions need to be taken.
 
-### Attack patterns
+### STIX Object Types Supported
 
-The attack patterns ([TTPType](https://stixproject.github.io/data-model/1.2/ttp/TTPType/) and others) are *not yet implemented by Microsoft*. This means that information from Galaxies and Clusters (such as those from MITRE) added to events or attributes are included in the synchronisation. Once there is full STIX support from Microsoft these attack patterns will be imported.
+The STIX Objects API now supports uploading multiple object types:
+
+- **Indicators** - IOCs with STIX patterns (e.g., malicious IPs, domains, file hashes)
+- **Threat Actors** - Information about adversaries and threat groups from MISP
+- **Identities** - Victim organizations, targets, or creator identities
+- **Relationships** - Connections between STIX objects such as:
+  - `threat-actor` → `attributed-to` → `identity`
+  - `indicator` → `indicates` → `threat-actor`
+  - `threat-actor` → `targets` → `identity`
 
 ### "Created by" in Sentinel
 
-The "Created by" field refers to the UUID of the organisation that created the event in MISP. The [identity](https://stixproject.github.io/documentation/idioms/identity/) concept is not yet implemented on the Sentinel side. It is in the STIX export from MISP but as identity objects are not yet created in Sentinel, the reference is only a textual link to the MISP organisation UUID.
+The "Created by" field refers to the UUID of the organisation that created the event in MISP. Identity objects are now supported by the STIX Objects API and will be created in Sentinel when present in MISP events.
 
 ### Mappings
 
@@ -329,19 +347,15 @@ You can identify the Sentinel threat type on event and attribute level with the 
 
 #### Kill Chain
 
-The [Kill Chain tags](https://www.misp-project.org/taxonomies.html#_kill_chain) are translated by the Graph API to the [Kill Chain values of Microsoft](https://learn.microsoft.com/en-us/graph/api/resources/tiindicator?view=graph-rest-beta#killchain-values). Note that Sentinel uses C2 and Actions instead of "Command and Control" and "Actions on Objectives". The Upload Indicators API translates them to the [STIX](https://stixproject.github.io/documentation/idioms/kill-chain/) Kill Chain entities. In addition, the integration for the Upload Indicators API will also translate the MISP category into a Kill Chain.
+The [Kill Chain tags](https://www.misp-project.org/taxonomies.html#_kill_chain) are translated to [STIX](https://stixproject.github.io/documentation/idioms/kill-chain/) Kill Chain entities. In addition, the integration will also translate the MISP category into a Kill Chain.
 
 #### TLP
 
 The TLP (Traffic Light Protocol) tags of an event and attribute are translated to the STIX markers. If there's a TLP set on the attribute level then this takes precedence. If no TLP is set (on event or attribute), then **tlp-white** is applied (set via `SENTINEL_DEFAULT_TLP`.)
 
-#### Diamond model
-
-The Graph API translates the tags from the **diamond-model** taxonomy to [Sentinel](https://learn.microsoft.com/en-us/graph/api/resources/tiindicator?view=graph-rest-beta#diamondmodel-values). properties for `diamondModel`. The Diamond model is not used by the Upload Indicators API.
-
 #### Threat actors
 
-The Graph API translates the MISP attributes **threat-actor** to Sentinel properties for `activityGroupNames`. The MISP attributes **comment** are added to the Sentinel `description`. This is not used by the Upload Indicators API. Future versions of the Microsoft API will support attack patterns etc.
+Threat actor information from MISP is now uploaded as dedicated STIX threat-actor objects, preserving all the structured information about adversaries including names, aliases, and threat actor types.
 
 #### Ignored types
 
@@ -349,15 +363,17 @@ Only indicators of type `stix` are used, as such the attributes of type `yara` o
 
 #### Expiration date
 
-For the Upload Indicators API:
+For indicators:
 - If the attribute type is in `days_to_expire_mapping`, use the days defined in the mapping
-- If the there is no mapping, then use the default `days_to_expire`
+- If there is no mapping, then use the default `days_to_expire`
 - Start counting from today if `days_to_expire_start` is "current_date" (or from the "valid_from" time)
 - If the end count date is beyond the date set in "valid_until", then discard the indicator
 
-The `valid_until` value is set in MISP with the `last_seen` of an attribute. Depending on your use case you might want to ignore the `last_seen` of an attribute, and consequently ignore the  `valid_until` value. Do this by setting the configuration option `days_to_expire_ignore_misp_last_seen` to True.
+The `valid_until` value is set in MISP with the `last_seen` of an attribute. 
 
-```
+**By default**, the integration uses MISP's `last_seen` attribute for indicator expiration. If you want to override this and calculate expiration dates based only on your config settings (ignoring MISP's `last_seen`), set the configuration option `days_to_expire_ignore_misp_last_seen` to True.
+
+```python
 days_to_expire_ignore_misp_last_seen = True
 ```
 
@@ -421,7 +437,7 @@ MISP_SPECIAL_CASE_TYPES = frozenset([
 The supported hashes are defined in the set `MISP_HASH_TYPES`.
 
 
-### Detailed workflow for Upload Indicators API
+### Detailed workflow for STIX Objects API
 
 The integration workflow is as follows:
 
@@ -435,39 +451,167 @@ The integration workflow is as follows:
       - If you provided a limit in `misp_event_filters`, then events are queried in one go
       - Note that the MISP REST API supports returning STIX2 format, but at the time of development the API didn't handle requests for non-existing pages (pages with a result set of 0 events; the API does not return the number of pages, so you have to query until the result set is 0)
       - This was raised as a bug report with [issue 44](https://github.com/MISP/misp-stix/issues/44) in misp-stix and solved with [MISP/MISP@18fd906](https://github.com/MISP/MISP/commit/18fd906e52065e8a46b06c420c562d957459d639)
-        - On the roadmap withissue [issue 52](https://github.com/cudeso/misp2sentinel/issues/52)
+        - On the roadmap with [issue 52](https://github.com/cudeso/misp2sentinel/issues/52)
   - In `RequestObject_Event` the event tags are converted to tags, the event name is set and a TLP is set
   - For each event, it will **parse and convert the JSON to STIX** with `MISPtoSTIX21Parser` with the function `parse_misp_event()` (this is part of misp-stix)
   - This conversion returns **stix_objects**. If the conversion returns errors, the script will continue. The reason is that we want the upload to continue, even if the conversion for one event fails.
     - **DEBUG** You can track these errors with the message `Error when processing data in event {} from MISP {}`
-  - It then loops through the stix objects
-    - Only valid types for uploading to the Upload Indicators API are considered
+  - It then loops through the STIX objects
+    - Only valid types for uploading to the STIX Objects API are considered: `indicator`, `threat-actor`, `identity`, `relationship`
       - An invalid type is ignored and processing continues
-      - For example indicators of type YARA are ignored, but other indicators in the event should still be processed
-    - For each indicator, the class `RequestObject_Indicator` is instantiated
-      - This sets the description to refer to the event
-      - Converts the MISP tags to labels, removing some of the non-relevant tags
-      - Adds the confidence level
-      - Sets the sentinel-threattype, kill chain and tlp labels
-      - Adds a reference to the MISP event
-      - Sets the expiration date of the attribute
+      - For example indicators of type YARA are ignored, but other objects in the event should still be processed
+    - For each object type, the appropriate RequestObject class is instantiated:
+      - **Indicators**: `RequestObject_Indicator` sets description, converts tags to labels, adds confidence level, sets sentinel-threattype/kill chain/tlp labels, adds reference to MISP event, and sets expiration date
+      - **Threat Actors**: `RequestObject_ThreatActor` preserves threat actor information including name, aliases, threat actor types, and adds reference to MISP event
+      - **Identities**: `RequestObject_Identity` preserves identity information including name, identity class, sectors, and adds reference to MISP event
+      - **Relationships**: `RequestObject_Relationship` preserves relationship type, source and target references, and adds reference to MISP event
     - Only if there is a valid expiration date of the indicator (either calculated or set in the threat event), the indicator is considered
       - Errors are logged with `Skipping indicator because valid_until was not set by MISP/MISP2Sentinel {}`
-    - Valid indicators are added to the list `result_set`
-  - When all indicators are processed, it logs `Processed {} indicators` (if debug is set to True)
-  - When all remaining pages with results are processed, it logs `Received {} indicators in MISP`
+    - Valid STIX objects are added to the list `result_set`
+  - When all objects are processed, it logs `Processed {} STIX objects`
+  - When all remaining pages with results are processed, it logs `Received {} STIX objects in MISP`
   - Then `upload_indicators()` from `RequestManager` is called
     - At this stage the script will start interacting with Microsoft Sentinel. All actions before this step are "local", related to MISP
-    - It takes into account the upload limits. If it needs to wait an message is logged with `Pausing upload for API request limit {}`.    
-  - It starts processing all `processed_indicators`
-    - Uploads are done in batches of `config.ms_max_indicators_request` indicators
-    - A POST request is done to Microsoft Sentinel
-      - If the HTTP status code is not 200, or if the "error" key is in the response then something went wrong. This is logged with `Error when submitting indicators. {}`.
+    - It takes into account the upload limits. If it needs to wait a message is logged with `Pausing upload for API request limit {}`.    
+  - It starts processing all STIX objects
+    - Uploads are done in batches of `config.ms_max_indicators_request` objects
+    - Objects are formatted into the required request body with `sourcesystem` and `stixobjects` fields
+    - A POST request is done to the Microsoft Sentinel STIX Objects API
+      - If the HTTP status code is not 200, or if the "error" key is in the response then something went wrong. This is logged with `Error when submitting STIX objects. {}`.
         - An error indicates the Azure App does not have sufficient permissions, or that something on the receiving (Sentinel) side is not OK.
-      - If the request was successful, it logs this with `Indicators sent - request number: {} / indicators: {} / remaining: {}`
-  - When it's done, it will log `Finished uploading indicators`
+      - If the request was successful, it logs this with `STIX objects sent - request number: {} / objects: {} / remaining: {}`
+  - When it's done, it will log `Finished uploading STIX objects`
 
 ![docs/base-MISP2Sentinel-workflow.png](docs/base-MISP2Sentinel-workflow.png)
+
+## Revoking Indicators
+
+The integration includes a utility script `revoke_indicator.py` that allows you to manually revoke indicators in Microsoft Sentinel.
+
+### When to Revoke Indicators
+
+You might want to revoke an indicator when:
+- An IOC was resolved or is no longer malicious in MISP
+- An indicator was uploaded by mistake
+- You need to immediately invalidate an indicator
+
+### How Revocation Works
+
+The script automatically queries Sentinel Log Analytics to retrieve the original indicator, then creates an updated version with:
+1. Setting `revoked` to `true`
+2. Updating `modified` timestamp to now
+3. Setting `valid_until` to the current timestamp (expires immediately)
+4. **Preserving all other original fields** to ensure Sentinel recognizes this as an update
+
+### Prerequisites
+
+The service principal (Azure App) needs the **Log Analytics Reader** role on the Log Analytics workspace:
+
+1. Navigate to your Log Analytics Workspace in Azure Portal
+2. Select **Access control (IAM)**
+3. Select **Add** > **Add role assignment**
+4. Select **Log Analytics Reader** role > **Next**
+5. Select your service principal (the same app used for Sentinel integration)
+6. Select **Review + assign**
+
+### Usage
+
+#### Simplified Command-Line Mode (Recommended)
+
+Simply provide the STIX ID - the script automatically queries and revokes:
+
+```bash
+python revoke_indicator.py --id "indicator--abc123..."
+```
+
+This will:
+1. Query Sentinel for the original indicator
+2. Preserve all original data
+3. Update only the revoked status and expiration
+4. Upload the updated indicator
+
+#### Interactive Mode
+
+Run without arguments for an interactive CLI:
+
+```bash
+python revoke_indicator.py
+```
+
+You'll see two options:
+1. **Auto-revoke** (recommended): Provide only the STIX ID, script queries everything
+2. **Manual revoke**: Provide all indicator details manually
+
+#### Manual Mode (Fallback)
+
+If auto-query doesn't work or you don't have Log Analytics Reader permissions:
+
+```bash
+python revoke_indicator.py \
+  --id "indicator--abc123..." \
+  --pattern "[ipv4-addr:value = '1.2.3.4']" \
+  --manual \
+  --created "2024-01-01T00:00:00.000Z" \
+  --valid-from "2024-01-01T00:00:00.000Z"
+```
+
+### Finding the STIX ID
+
+You can find the STIX ID from Sentinel Log Analytics:
+
+```kql
+ThreatIntelligenceIndicator
+| where IndicatorId contains "1.2.3.4"  // or any search term
+| extend StixObject = parse_json(AdditionalInformation)
+| project TimeGenerated,
+          IndicatorId, 
+          StixId = tostring(StixObject.id),
+          Pattern = tostring(StixObject.pattern)
+| top 10 by TimeGenerated desc
+```
+
+The STIX ID format is: `indicator--{uuid}` (e.g., `indicator--12345678-1234-1234-1234-123456789abc`)
+
+### Example Workflow
+
+**Simple revocation (recommended):**
+1. Find the STIX ID from Log Analytics (query above)
+2. Run: `python revoke_indicator.py --id "indicator--abc123..."`
+3. Confirm the revocation
+4. The indicator is automatically queried and revoked
+
+**Verify revocation:**
+```kql
+ThreatIntelligenceIndicator
+| where IndicatorId == "indicator--abc123..."
+| extend StixObject = parse_json(AdditionalInformation)
+| project TimeGenerated, 
+          Revoked = StixObject.revoked,
+          ValidUntil = StixObject.valid_until
+| top 1 by TimeGenerated desc
+```
+
+### Important Notes
+
+- **Automatic Querying**: The auto-query mode requires Log Analytics Reader permissions on the workspace
+- **Same ID Preserved**: The original STIX ID is preserved to update the existing indicator
+- **All Data Preserved**: Original timestamps and all other fields are preserved automatically
+- **Immediate Effect**: Setting `revoked: true` and expiring the indicator makes it ineffective immediately
+- **Permanent Action**: Revoked indicators cannot be "un-revoked" - you would need to re-upload the original indicator with `revoked: false`
+- **Verification**: After revoking, query the ThreatIntelligenceIndicator table to verify:
+  ```kql
+  ThreatIntelligenceIndicator
+  | where IndicatorId == "indicator--your-id"
+  | extend StixObject = parse_json(AdditionalInformation)
+  | project TimeGenerated, Revoked = StixObject.revoked, ValidUntil = StixObject.valid_until
+  | top 1 by TimeGenerated desc
+  ```
+
+### Configuration
+
+The script uses the same `config.py` as the main integration script. Ensure you have:
+- Valid Microsoft authentication credentials (`ms_auth`)
+- Correct `sentinel_api_endpoint` and `sentinel_workspace_id`
 
 ## FAQ
 
@@ -479,7 +623,7 @@ The integration workflow is as follows:
 
 ### I don't see my indicator in Sentinel (2)
 
-If you are using the new Upload Indicators API then the integration with Sentinel relies on [https://github.com/MISP/misp-stix](https://github.com/MISP/misp-stix). The MISP attributes and objects are transformed to STIX objects. After that, only the `indicators` (defined in `UPLOAD_INDICATOR_API_ACCEPTED_TYPES`) are synchronised with Sentinel. As a consequence, if the conversion by MISP-STIX does not translate MISP attributes or objects to STIX objects, then the value does not get synchronised with Sentinel.
+The integration with Sentinel relies on [https://github.com/MISP/misp-stix](https://github.com/MISP/misp-stix). The MISP attributes and objects are transformed to STIX objects. After that, only the supported object types (defined in `STIX_OBJECTS_API_ACCEPTED_TYPES`: `indicator`, `threat-actor`, `identity`, `relationship`) are synchronised with Sentinel. As a consequence, if the conversion by MISP-STIX does not translate MISP attributes or objects to STIX objects, then the value does not get synchronised with Sentinel.
 
 Almost all MISP objects are translated, but there can be situations where the MISP object is not recognised. It is then translated to `x-misp-object` and not to an `indicator` STIX object. Elements from `x-misp-object` are not synchronised. If you run into this situation then open an issue with [https://github.com/MISP/misp-stix](https://github.com/MISP/misp-stix). Examples in the past include the [hashlookup object](https://github.com/MISP/misp-stix/issues/56).
 
@@ -506,45 +650,44 @@ for el in stix_objects:
 
 ### Can I get a copy of the requests sent to Sentinel?
 
-When you use the **Upload Indicators API** you can print the STIX package sent to Microsoft Sentinel by setting `write_parsed_indicators` to True. This writes all packages to `parsed_indicators.txt`. This file is overwritten at each execution of the script.
+You can print the STIX package sent to Microsoft Sentinel by setting `write_parsed_indicators` to True. This writes all packages to `parsed_indicators.txt`. This file is overwritten at each execution of the script.
 
 ### Can I get a copy of the response errors returned by Sentinel?
 
-When you use the **Upload Indicators API** you can print the errors returned by Sentinel by setting `sentinel_write_response` to True. This writes the response strings from Microsoft Sentinel that contain an "error" key to `sentinel_response.txt`.
+You can print the errors returned by Sentinel by setting `sentinel_write_response` to True. This writes the response strings from Microsoft Sentinel that contain an "error" key to `sentinel_response.txt`.
 
 ### An attribute with to_ids to False is sent to Sentinel
 
-With the Upload Indicators API the conversion to STIX2 is done with misp-stix. Unfortunately the current version does not take into account the to_ids flag set on attributes in objects. See [#48](https://github.com/MISP/misp-stix/issues/48).
+The conversion to STIX2 is done with misp-stix. Unfortunately the current version does not take into account the to_ids flag set on attributes in objects. See [#48](https://github.com/MISP/misp-stix/issues/48).
 
-### What is tenant, client_id and workspace_id?
+### What is tenant_id, client_id and sentinel_workspace_id?
 
-- `tenant` is the Directory ID. Get get it by searching for **Tenant Properties** in Azure
+- `tenant_id` is the Directory ID. Get it by searching for **Tenant Properties** in Azure
 - `client_id` is Application client ID. Get it by listing the **App Registrations** in Azure and using the column Application (client) ID
-- `workspace_id` is the workspace ID. Get it by opening the Log Analytics workspace and the Workspace ID in the Essentials overview
+- `sentinel_workspace_id` is the workspace ID. Get it by opening the Log Analytics workspace and the Workspace ID in the Essentials overview
 
 ### I need help with the MISP event filters
 
 The blog post [Figuring out MISP2Sentinel Event Filters](https://www.infernux.no/MISP2Sentinel-EventFilters/) can help you defining the `misp_event_filters`. If you want to be more granular with time based filters then take a look at the MISP playbook [Using timestamps in MISP](https://github.com/MISP/misp-playbooks/blob/main/misp-playbooks/pb_using_timestamps_in_MISP-with_output.ipynb). And lastly, have a look at the different [MISP Open API specifications](https://www.misp-project.org/openapi/#tag/Events/operation/restSearchEvents) for the event search.
 
-### What are the configuration changes compared to the old Graph API version?
+### What are the configuration changes for the STIX Objects API?
 
-| Old | New |
-|-----|-----|
-| graph_auth  | ms_auth (now requires a 'scope') |
-| targetProduct  | ms_target_product (Graph API only) |
-| action | ms_action (Graph API only) |
-| passiveOnly | ms_passiveonly (Graph API only)|
-| defaultConfidenceLevel | default_confidence |
-| | ms_api_version (Upload indicators) |
-| | ms_max_indicators_request (Upload indicators) |
-| | ms_max_requests_minute (Upload indicators) |
-| | misp_event_limit_per_page (Upload indicators) |
-| | days_to_expire_start (Upload indicators) |
-| | days_to_expire_mapping (Upload indicators) |
-| | days_to_expire_ignore_misp_last_seen (Upload indicators) |
-| | log_file (Upload indicators) |
-| | misp_remove_eventreports (Upload indicators) |
-| | sentinel_write_response (Upload indicators) |
+**Breaking Changes:**
+- Removed `graph_api` flag from `ms_auth` configuration
+- Renamed `tenant` to `tenant_id` in `ms_auth` 
+- Removed `workspace_id` from `ms_auth`, now use standalone `sentinel_workspace_id`
+- Changed `scope` from `https://management.azure.com/.default` to `https://sentinel.azure.com/.default`
+- Added `sentinel_api_endpoint` configuration (default: `https://api.ti.sentinel.azure.com`)
+
+**New STIX Object Types Supported:**
+- `indicator` - IOCs with STIX patterns
+- `threat-actor` - Adversary information
+- `identity` - Victim/target or creator information
+- `relationship` - Links between objects
+
+**Removed Settings:**
+- Graph API specific settings: `ms_action`, `ms_passiveonly`, `ms_target_product`, `network_ignore_direction`, `write_post_json`
+- Upload Indicators API settings: `ms_api_version`
 
 Have a look at [_init_configuration()](https://github.com/cudeso/misp2sentinel/blob/main/script.py#L145) for all the details.
 
@@ -557,7 +700,34 @@ You can control the list of tags that get synchronised with variables in the `co
 
 ### Error: KeyError: 'access_token'
 
-This error occurs when the client_id, tenant, client_secret or workspace_id are invalid. Check the values in the Azure App.
+This error occurs when the client_id, tenant_id, client_secret or sentinel_workspace_id are invalid. Check the values in the Azure App.
+
+### Error: 404 Resource Not Found when uploading to Sentinel
+
+If you encounter a 404 error when uploading STIX objects, verify:
+
+1. **Regional Endpoint**: The STIX Objects API uses **regional endpoints**. Use the **same base endpoint** you were using for the Upload Indicators API:
+   - If you were using `https://sentinelus.azure-api.net` → Keep using `https://sentinelus.azure-api.net`
+   - If you were using a global endpoint → Use `https://api.ti.sentinel.azure.com`
+   
+2. **Workspace ID**: Verify your `sentinel_workspace_id` is correct. Get it from the Log Analytics workspace Overview page
+
+3. **Permissions**: Ensure the Azure App has **Microsoft Sentinel Contributor** role assigned to the workspace
+
+4. **API Path**: The STIX Objects API path is `/threatintelligence/stixobjects:upload` (not `/threatintelligence:upload-indicators`)
+
+5. **API Version**: The STIX Objects API uses `api-version=2024-02-01`
+
+The full URL format should be:
+```
+{your-regional-endpoint}/{workspace_id}/threatintelligence/stixobjects:upload?api-version=2024-02-01
+
+Examples:
+- US: https://sentinelus.azure-api.net/{workspace_id}/threatintelligence/stixobjects:upload?api-version=2024-02-01
+- Global: https://api.ti.sentinel.azure.com/{workspace_id}/threatintelligence/stixobjects:upload?api-version=2024-02-01
+```
+
+**Enable verbose logging** to see the exact URL being called by setting `verbose_log = True` in your config.
 
 ### Error: Unable to process indicator. Invalid indicator type or invalid valid_until date.
 
@@ -570,10 +740,9 @@ The MISP2Sentinel requires access to a number of web resources.
 - MISP
   - HTTPS access to your MISP server, either via localhost (127.0.0.1) or from remote
 - HTTPS access to these Azure resources
-  - sentinelus.azure-api.net
+  - Your regional Sentinel endpoint (e.g., `sentinelus.azure-api.net` or `api.ti.sentinel.azure.com`)
   - login.microsoftonline.com
-  - graph.microsoft.com/.default
-  - management.azure.com
+  - sentinel.azure.com
 
 ## Additional documentation
 

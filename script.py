@@ -3,7 +3,7 @@ import config
 from collections import defaultdict
 import datetime
 from RequestManager import RequestManager
-from RequestObject import RequestObject, RequestObject_Event, RequestObject_Indicator
+from RequestObject import RequestObject, RequestObject_Event, RequestObject_Indicator, RequestObject_ThreatActor, RequestObject_Identity, RequestObject_Relationship
 from constants import *
 import sys
 from functools import reduce
@@ -79,13 +79,13 @@ def _handle_tlp_level(parsed_event):
 
 
 def _get_misp_events_stix():
-    logger.info(f"Using the following values for MISP API call: domain: {config.misp_domain}")
+    logger.info("Using the following values for MISP API call: domain: %s", config.misp_domain)
     misp = PyMISP(config.misp_domain, config.misp_key, config.misp_verifycert, False)
     result_set = []
     logger.debug("Query MISP for events.")
     remaining_misp_pages = True
     misp_page = 1
-    misp_indicator_ids = []
+    misp_object_ids = []
 
     while remaining_misp_pages:
         try:
@@ -96,7 +96,7 @@ def _get_misp_events_stix():
                 result = misp.search(controller='events', return_format='json', **config.misp_event_filters, limit=config.misp_event_limit_per_page, page=misp_page)
 
             if len(result) > 0:
-                logger.info("Received MISP events page {} with {} events".format(misp_page, len(result)))
+                logger.info("Received MISP events page %s with %s events", misp_page, len(result))
                 for event in result:
                     misp_event = RequestObject_Event(event["Event"], logger, config.misp_flatten_attributes)
                     try:
@@ -104,47 +104,72 @@ def _get_misp_events_stix():
                         parser.parse_misp_event(misp_event.event)
                         stix_objects = parser.stix_objects
                     except Exception as e:
-                        logger.error("Error when processing data in event {} from MISP {}. Most likely a MISP-STIX conversion problem.".format(misp_event.id, e))
+                        logger.error("Error when processing data in event %s from MISP %s. Most likely a MISP-STIX conversion problem.", misp_event.id, e)
                         continue
                     if config.write_parsed_eventid:
-                        logger.info("Processing event {} {}".format(event["Event"]["id"], event["Event"]["info"]))
+                        logger.info("Processing event %s %s", event["Event"]["id"], event["Event"]["info"])
                     for element in stix_objects:
-                        if element.type in UPLOAD_INDICATOR_API_ACCEPTED_TYPES and \
-                                        element.id not in misp_indicator_ids:
-                            misp_indicator = RequestObject_Indicator(element, misp_event, logger)
-                            if misp_indicator.id:
-                                if misp_indicator.valid_until:
-                                    valid_until = json.dumps(misp_indicator.valid_until, cls=STIXJSONEncoder).replace("\"", "")
-                                    # Strip the dots from 'valid_until' to avoid date parse errors
-                                    if "." in valid_until:
-                                        valid_until = valid_until.split(".")[0]
-                                    # There must be a "cleaner-Python" way to deal with converting these date formats
-                                    if "Z" in valid_until:
-                                        date_object = datetime.fromisoformat(valid_until[:-1])
+                        if element.type in STIX_OBJECTS_API_ACCEPTED_TYPES and \
+                                        element.id not in misp_object_ids:
+                            misp_object = None
+                            
+                            if element.type == 'indicator':
+                                misp_object = RequestObject_Indicator(element, misp_event, logger)
+                                if misp_object.id:
+                                    if misp_object.valid_until:
+                                        valid_until = json.dumps(misp_object.valid_until, cls=STIXJSONEncoder).replace("\"", "")
+                                        # Strip the dots from 'valid_until' to avoid date parse errors
+                                        if "." in valid_until:
+                                            valid_until = valid_until.split(".")[0]
+                                        # There must be a "cleaner-Python" way to deal with converting these date formats
+                                        if "Z" in valid_until:
+                                            date_object = datetime.fromisoformat(valid_until[:-1])
+                                        else:
+                                            date_object = datetime.fromisoformat(valid_until)
+                                        if date_object > datetime.now():
+                                            if config.verbose_log:
+                                                logger.debug("Add %s to list of objects to upload", misp_object.pattern)
+                                            misp_object_ids.append(misp_object.id)
+                                            result_set.append(misp_object._get_dict())
+                                        else:
+                                            logger.error("Skipping outdated indicator %s in event %s, valid_until: %s", misp_object.pattern, misp_event.id, valid_until)
                                     else:
-                                        date_object = datetime.fromisoformat(valid_until)
-                                    if date_object > datetime.now():
-                                        if config.verbose_log:
-                                            logger.debug("Add {} to list of indicators to upload".format(misp_indicator.pattern))
-                                        misp_indicator_ids.append(misp_indicator.id)
-                                        result_set.append(misp_indicator._get_dict())
-                                    else:
-                                        logger.error("Skipping outdated indicator {} in event {}, valid_until: {}".format(misp_indicator.pattern, misp_event.id, valid_until))
+                                        logger.error("Skipping indicator because valid_until was not set by MISP/MISP2Sentinel %s", misp_object.id)
                                 else:
-                                    logger.error("Skipping indicator because valid_until was not set by MISP/MISP2Sentinel {}".format(misp_indicator.id))
-                            else:
-                                logger.error("Unable to process indicator. Invalid indicator type or invalid valid_until date. Event {}".format(misp_event.id))
-                logger.info("Processed {} indicators".format(len(result_set)))
+                                    logger.error("Unable to process indicator. Invalid indicator type or invalid valid_until date. Event %s", misp_event.id)
+                            
+                            elif element.type == 'threat-actor':
+                                misp_object = RequestObject_ThreatActor(element, misp_event, logger)
+                                if config.verbose_log:
+                                    logger.debug("Add threat-actor %s to list of objects to upload", misp_object.name)
+                                misp_object_ids.append(misp_object.id)
+                                result_set.append(misp_object._get_dict())
+                            
+                            elif element.type == 'identity':
+                                misp_object = RequestObject_Identity(element, misp_event, logger)
+                                if config.verbose_log:
+                                    logger.debug("Add identity %s to list of objects to upload", misp_object.name)
+                                misp_object_ids.append(misp_object.id)
+                                result_set.append(misp_object._get_dict())
+                            
+                            elif element.type == 'relationship':
+                                misp_object = RequestObject_Relationship(element, misp_event, logger)
+                                if config.verbose_log:
+                                    logger.debug("Add relationship %s to list of objects to upload", misp_object.relationship_type)
+                                misp_object_ids.append(misp_object.id)
+                                result_set.append(misp_object._get_dict())
+                
+                logger.info("Processed %s STIX objects", len(result_set))
                 misp_page += 1
             else:
                 remaining_misp_pages = False
 
         except exceptions.MISPServerError as e:
             remaining_misp_pages = False
-            logger.error("Error received from the MISP server {} - {} - {}".format(e, sys.exc_info()[2].tb_lineno, sys.exc_info()[1]))
+            logger.error("Error received from the MISP server %s - %s - %s", e, sys.exc_info()[2].tb_lineno, sys.exc_info()[1])
         except Exception as e:
             remaining_misp_pages = False
-            logger.error("Error when processing data from MISP {} - {} - {}".format(e, sys.exc_info()[2].tb_lineno, sys.exc_info()[1]))
+            logger.error("Error when processing data from MISP %s - %s - %s", e, sys.exc_info()[2].tb_lineno, sys.exc_info()[1])
 
     return result_set, len(result_set)
 
@@ -221,70 +246,21 @@ def _build_logger():
 
 def main():
     logger.info("Fetching and parsing data from MISP ...")
-    if config.ms_auth.get("graph_api", False):
-        logger.info("Using Microsoft Graph API")
-        events = _get_events()
-        parsed_events = list()
-        for event in events:
-            parsed_event = defaultdict(list)
-
-            for key, mapping in EVENT_MAPPING.items():
-                parsed_event[mapping] = event.get(key, "")
-
-            # Tags on event level
-            tags = []
-            for tag in event.get("Tag", []):
-                if 'sentinel-threattype' in tag['name']:    # Can be overridden on attribute level
-                    parsed_event['threatType'] = tag['name'].split(':')[1]
-                    continue
-                if config.ignore_localtags:
-                    if tag["local"] != 1:
-                        tags.append(tag['name'].strip())
-            parsed_event['tags'] = tags
-            _handle_diamond_model(parsed_event)
-            _handle_tlp_level(parsed_event)
-            _handle_timestamp(parsed_event)
-
-            for attr in event['Attribute']:
-                if attr['type'] == 'threat-actor':
-                    parsed_event['activityGroupNames'].append(attr['value'])
-                if attr['type'] == 'comment':
-                    parsed_event['description'] += attr['value']
-                if attr['type'] in MISP_ACTIONABLE_TYPES and attr['to_ids'] == True:
-                    parsed_event['request_objects'].append(RequestObject(attr, parsed_event['description']))
-            for obj in event['Object']:
-                for attr in obj['Attribute']:
-                    if attr['type'] == 'threat-actor':
-                        parsed_event['activityGroupNames'].append(attr['value'])
-                    if attr['type'] == 'comment':
-                        parsed_event['description'] += attr['value']
-                    if attr['type'] in MISP_ACTIONABLE_TYPES and attr['to_ids'] == True:
-                        parsed_event['request_objects'].append(RequestObject(attr, parsed_event['description']))
-            parsed_events.append(parsed_event)
-        del events
-        total_indicators = sum([len(v['request_objects']) for v in parsed_events])
-    else:
-        logger.info("Using Microsoft Upload Indicator API")
-        parsed_indicators, total_indicators = _get_misp_events_stix()
-        logger.info("Received {} indicators in MISP".format(total_indicators))
+    logger.info("Using Microsoft Sentinel STIX Objects API")
+    parsed_indicators, total_indicators = _get_misp_events_stix()
+    logger.info("Received %s STIX objects in MISP", total_indicators)
 
     if config.dry_run:
         logger.info("Dry run. Not uploading to Sentinel")
     else:
-        with RequestManager(total_indicators, logger, config.ms_auth[TENANT]) as request_manager:
-            if config.ms_auth["graph_api"]:
-                for request_body in _graph_post_request_body_generator(parsed_events):
-                    if config.verbose_log:
-                        logger.debug("request body: {}".format(request_body))
-                    request_manager.handle_indicator(request_body)
-            else:
-                logger.info("Start uploading indicators")
-                request_manager.upload_indicators(parsed_indicators)
-                logger.info("Finished uploading indicators")
-                if config.write_parsed_indicators:
-                    json_formatted_str = json.dumps(parsed_indicators, indent=4)
-                    with open("parsed_indicators.txt", "w") as fp:
-                        fp.write(json_formatted_str)
+        with RequestManager(total_indicators, logger, config.ms_auth[TENANT_ID]) as request_manager:
+            logger.info("Start uploading STIX objects")
+            request_manager.upload_indicators(parsed_indicators)
+            logger.info("Finished uploading STIX objects")
+            if config.write_parsed_indicators:
+                json_formatted_str = json.dumps(parsed_indicators, indent=4)
+                with open("parsed_indicators.txt", "w") as fp:
+                    fp.write(json_formatted_str)
 
 
 if __name__ == '__main__':

@@ -144,8 +144,15 @@ class RequestObject_Indicator:
                                             })
 
             date_object = False
-            # Set the valid_until if not set by MISP (never ; https://github.com/MISP/misp-stix/issues/1)
-            if config.days_to_expire_ignore_misp_last_seen or not self.valid_until:
+            # Use MISP's last_seen (valid_until) if available, unless configured to ignore it
+            # When days_to_expire_ignore_misp_last_seen=False (default), prefer MISP's last_seen
+            # When days_to_expire_ignore_misp_last_seen=True, always calculate expiration
+            days_to_expire_ignore = getattr(config, 'days_to_expire_ignore_misp_last_seen', False)
+            if not days_to_expire_ignore and self.valid_until:
+                # Use MISP's last_seen attribute (already converted to valid_until by misp-stix)
+                logger.debug("Using MISP last_seen for valid_until: %s", self.valid_until)
+            else:
+                # Calculate expiration based on config settings
                 days_to_expire = config.days_to_expire
 
                 # If we have a mapping, then we use a custom number of days to expire
@@ -189,6 +196,142 @@ class RequestObject_Indicator:
             if not ignore:
                 new_labels.append(label)
         self.labels = new_labels
+
+
+class RequestObject_ThreatActor:
+    """Class to handle threat-actor STIX objects for the STIX Objects API"""
+    
+    def _get_dict(self):
+        dict = {}
+        dict["type"] = self.type
+        dict["spec_version"] = self.spec_version
+        dict["id"] = self.id
+        dict["created"] = json.dumps(self.created, cls=STIXJSONEncoder).replace("\"", "")
+        dict["modified"] = json.dumps(self.modified, cls=STIXJSONEncoder).replace("\"", "")
+        dict["name"] = self.name
+        if hasattr(self, "description") and self.description:
+            dict["description"] = self.description
+        if hasattr(self, "threat_actor_types") and self.threat_actor_types:
+            dict["threat_actor_types"] = self.threat_actor_types
+        if hasattr(self, "aliases") and self.aliases:
+            dict["aliases"] = self.aliases
+        if hasattr(self, "labels") and self.labels:
+            dict["labels"] = self.labels
+        if hasattr(self, "object_marking_refs") and self.object_marking_refs:
+            dict["object_marking_refs"] = self.object_marking_refs
+        if hasattr(self, "external_references") and self.external_references:
+            dict["external_references"] = self.external_references
+        return dict
+
+    def __init__(self, element, misp_event, logger):
+        self.misp_event = misp_event
+        self.logger = logger
+        
+        # Convert all the STIX threat-actor elements
+        for el in element:
+            setattr(self, el, element[el])
+        
+        # Add reference to MISP event
+        if not hasattr(self, "external_references"):
+            self.external_references = []
+        self.external_references.append({
+            "source_name": "MISP",
+            "description": "MISP Event: {}".format(misp_event.info),
+            "external_id": misp_event.uuid,
+            "url": "{}/events/view/{}".format(config.misp_domain, misp_event.uuid)
+        })
+
+
+class RequestObject_Identity:
+    """Class to handle identity STIX objects for the STIX Objects API"""
+    
+    def _get_dict(self):
+        dict = {}
+        dict["type"] = self.type
+        dict["spec_version"] = self.spec_version
+        dict["id"] = self.id
+        dict["created"] = json.dumps(self.created, cls=STIXJSONEncoder).replace("\"", "")
+        dict["modified"] = json.dumps(self.modified, cls=STIXJSONEncoder).replace("\"", "")
+        dict["name"] = self.name
+        dict["identity_class"] = self.identity_class
+        if hasattr(self, "description") and self.description:
+            dict["description"] = self.description
+        if hasattr(self, "sectors") and self.sectors:
+            dict["sectors"] = self.sectors
+        if hasattr(self, "contact_information") and self.contact_information:
+            dict["contact_information"] = self.contact_information
+        if hasattr(self, "labels") and self.labels:
+            dict["labels"] = self.labels
+        if hasattr(self, "object_marking_refs") and self.object_marking_refs:
+            dict["object_marking_refs"] = self.object_marking_refs
+        if hasattr(self, "external_references") and self.external_references:
+            dict["external_references"] = self.external_references
+        return dict
+
+    def __init__(self, element, misp_event, logger):
+        self.misp_event = misp_event
+        self.logger = logger
+        
+        # Convert all the STIX identity elements
+        for el in element:
+            setattr(self, el, element[el])
+        
+        # Add reference to MISP event
+        if not hasattr(self, "external_references"):
+            self.external_references = []
+        self.external_references.append({
+            "source_name": "MISP",
+            "description": "MISP Event: {}".format(misp_event.info),
+            "external_id": misp_event.uuid,
+            "url": "{}/events/view/{}".format(config.misp_domain, misp_event.uuid)
+        })
+
+
+class RequestObject_Relationship:
+    """Class to handle relationship STIX objects for the STIX Objects API"""
+    
+    def _get_dict(self):
+        dict = {}
+        dict["type"] = self.type
+        dict["spec_version"] = self.spec_version
+        dict["id"] = self.id
+        dict["created"] = json.dumps(self.created, cls=STIXJSONEncoder).replace("\"", "")
+        dict["modified"] = json.dumps(self.modified, cls=STIXJSONEncoder).replace("\"", "")
+        dict["relationship_type"] = self.relationship_type
+        dict["source_ref"] = self.source_ref
+        dict["target_ref"] = self.target_ref
+        if hasattr(self, "description") and self.description:
+            dict["description"] = self.description
+        if hasattr(self, "labels") and self.labels:
+            dict["labels"] = self.labels
+        if hasattr(self, "object_marking_refs") and self.object_marking_refs:
+            dict["object_marking_refs"] = self.object_marking_refs
+        if hasattr(self, "external_references") and self.external_references:
+            dict["external_references"] = self.external_references
+        return dict
+
+    def __init__(self, element, misp_event, logger):
+        self.misp_event = misp_event
+        self.logger = logger
+        
+        # Convert all the STIX relationship elements
+        for el in element:
+            setattr(self, el, element[el])
+        
+        # Ensure required attributes are set (for linters)
+        # These will be overwritten by setattr above if present in element
+        if not hasattr(self, 'relationship_type'):
+            self.relationship_type = element.get('relationship_type', '')
+        
+        # Add reference to MISP event
+        if not hasattr(self, "external_references"):
+            self.external_references = []
+        self.external_references.append({
+            "source_name": "MISP",
+            "description": "MISP Event: {}".format(misp_event.info),
+            "external_id": misp_event.uuid,
+            "url": "{}/events/view/{}".format(config.misp_domain, misp_event.uuid)
+        })
 
 
 class RequestObject_Event:
