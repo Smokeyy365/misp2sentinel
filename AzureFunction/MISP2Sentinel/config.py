@@ -14,6 +14,9 @@ tenant_id=os.getenv('tenant_id', '')
 workspace_id=os.getenv('workspace_id', '')
 client_id=os.getenv('client_id', '')
 client_secret=os.getenv('client_secret', '')
+subscription_id=os.getenv('subscription_id', '')
+resource_group_name=os.getenv('resource_group_name', '')
+workspace_name=os.getenv('workspace_name', '')
 
 # MS API settings
 ms_auth = {
@@ -23,7 +26,10 @@ ms_auth = {
     'new_upload_api': True,
     'scope': 'https://management.azure.com/.default',
     'graph_api': False,
-    'workspace_id': workspace_id
+    'workspace_id': workspace_id,
+    'subscription_id': subscription_id,
+    'resourceGroupName': resource_group_name,
+    'workspaceName': workspace_name,
 }
 
 ## If Azure Key Vault name variable is set, use it for secret values
@@ -57,6 +63,7 @@ ms_max_requests_minute = 100        # Throttle max: 100 requests per minute
 ms_useragent = 'MISP-1.0'
 ms_target_product = 'Azure Sentinel'    # targetProduct
 ms_api_version = "2024-02-01-preview"       # Upload Indicators API version
+ms_delete_api_version = os.getenv('ms_delete_api_version', '2025-09-01')   # Management API version used to delete indicators
 
 # Graph API only settings
 ms_passiveonly = False                  # passiveOnly
@@ -69,10 +76,7 @@ ms_action = 'alert'                     # action
 # MISP API settings
 misp_key = mispkey
 misp_domain = mispurl
-misp_verifycert = False
-
-if(not bool(local_mode)):
-    misp_verifycert = True
+misp_verifycert = local_mode.strip().lower() != 'true'
 
 # MISP Event filters
 if os.getenv('misp_event_filters', None):
@@ -91,6 +95,13 @@ else:
 
 # MISP pagination settings
 misp_event_limit_per_page = 100      # Limit memory use when querying MISP for STIX packages
+
+# Cleanup / deletion features (opt-in via env vars)
+sourcesystem = os.getenv('sourcesystem', 'MISP')
+dry_run = os.getenv('dry_run', 'False').strip().lower() == 'true'
+enable_verify_toids_change = os.getenv('enable_verify_toids_change', 'False').strip().lower() == 'true'
+enable_delete_outdated_indicators = os.getenv('enable_delete_outdated_indicators', 'False').strip().lower() == 'true'
+timeframe_toids_change = os.getenv('timeframe_toids_change', '1d')
 
 ########################
 # Integration settings #

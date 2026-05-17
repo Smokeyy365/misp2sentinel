@@ -63,7 +63,7 @@ The Azure App needs the **Microsoft Sentinel Contributor** role on each workspac
 
 #### Azure Function (optional)
 
-Instead of running the script on a server or alongside MISP, you can run it as an Azure Function. See [AzureFunction/README.MD](AzureFunction/README.MD) for instructions.
+Instead of running the script on a server or alongside MISP, you can run it as an Azure Function. See [AzureFunction/README.MD](AzureFunction/README.MD) for instructions. The Azure Function supports the same indicator upload and cleanup features as the standalone script; the cleanup features are configured via environment variables (see [Indicator cleanup](AzureFunction/README.MD#indicator-cleanup)).
 
 ### 2. MISP setup
 
@@ -116,11 +116,13 @@ ms_auth = {
 
 ```python
 ms_api_version = "2024-02-01-preview"
+ms_delete_api_version = "2025-09-01"
 ms_max_indicators_request = 100     # Maximum indicators per request (max 100)
 ms_max_requests_minute = 100        # Maximum requests per minute (max 100)
 ```
 
-- `ms_api_version`: The STIX objects API version. Leave this at `"2024-02-01-preview"`.
+- `ms_api_version`: The STIX objects upload API version. Leave this at `"2024-02-01-preview"`.
+- `ms_delete_api_version`: The management API version used by `--verify-recent-toids-change`, `--delete-outdated-indicators` and `delete-from-azure.py`. Leave this at `"2025-09-01"` unless Microsoft publishes a newer stable version.
 - `ms_max_indicators_request`: How many indicators to include in a single API call. The API allows at most 100.
 - `ms_max_requests_minute`: How many API calls to make per minute. The API allows at most 100. Combined, these settings give a maximum throughput of roughly 10,000 indicators per minute.
 
@@ -239,15 +241,15 @@ python script.py --uuid <event-uuid>
 
 ### Deleting indicators when to_ids changes
 
-When an analyst sets the `to_ids` flag to `False` on a MISP attribute, the corresponding indicator should no longer be in Sentinel. Use the `--verify-recent-toids-change` flag to find these attributes and revoke the matching indicators in Sentinel:
+When an analyst sets the `to_ids` flag to `False` on a MISP attribute, the corresponding indicator should no longer be in Sentinel. Use the `--verify-recent-toids-change` flag to find these attributes and delete the matching indicators in Sentinel:
 
 ```
 python script.py --verify-recent-toids-change
 ```
 
-This queries MISP for attributes where `to_ids` was recently set to `False`, looks them up in Sentinel and revokes any matches. Only indicators whose source matches `sourcesystem` (default `"MISP"`) are considered, so indicators from other feeds are never affected. The timeframe is controlled by `timeframe_toids_change` in `config.py` (default: `"1d"`). The flag can be combined with `--uuid`.
+This queries MISP for attributes where `to_ids` was recently set to `False`, looks them up in Sentinel and deletes them. Only indicators whose source matches `sourcesystem` (default `"MISP"`) are considered, so indicators from other feeds are never affected. The timeframe is controlled by `timeframe_toids_change` in `config.py` (default: `"1d"`). The flag can be combined with `--uuid`.
 
-Set `dry_run = True` to preview which indicators would be revoked without actually removing them.
+Set `dry_run = True` to preview which indicators would be deleted without actually removing them.
 
 ### Deleting outdated indicators
 
@@ -257,17 +259,27 @@ Use the `--delete-outdated-indicators` flag to remove indicators whose `validUnt
 python script.py --delete-outdated-indicators
 ```
 
-This queries Sentinel for all indicators from the configured `sourcesystem` whose `validUntil` is in the past, and revokes them in batches of 100. A 15-second pause between batches gives Sentinel time to process each revocation before the next query. The flag can be combined with `--uuid`.
+This queries Sentinel for all indicators from the configured `sourcesystem` whose `validUntil` is in the past, and deletes them. The flag can be combined with `--uuid`.
 
-Set `dry_run = True` to preview which indicators would be revoked without actually removing them.
+Set `dry_run = True` to preview which indicators would be deleted without actually removing them.
 
 ### How indicator deletion works
 
-The management API `DELETE` endpoint (`management.azure.com`) **cannot** delete indicators that were uploaded via the STIX Objects Upload API (`api.ti.sentinel.azure.com`). They live in different backing stores. The management API's `queryIndicators` aggregates from both stores, but `DELETE` only operates on its own store — returning `200`.
+Indicators are deleted by calling the Microsoft Sentinel ThreatIntelligence management API:
 
-The fix is to re-upload indicators with `revoked: true` via the same STIX Objects Upload API. The [STIX specification](https://docs.oasis-open.org/cti/stix/v2.1/os/stix-v2.1-os.html) defines revocation as permanent invalidation: *"Revoked objects are no longer considered valid by the object creator."*
+```
+DELETE https://management.azure.com/subscriptions/{subscriptionId}
+       /resourceGroups/{resourceGroupName}
+       /providers/Microsoft.OperationalInsights/workspaces/{workspaceName}
+       /providers/Microsoft.SecurityInsights/threatIntelligence/main/indicators/{name}
+       ?api-version=2025-09-01
+```
 
-Both `--verify-recent-toids-change` and `--delete-outdated-indicators` use this revocation mechanism.
+The indicator immediately disappears from the Sentinel **Threat Intelligence** blade and from `queryIndicators` results. Note that the underlying `ThreatIntelligenceIndicator` row in the Log Analytics workspace is **not** physically removed: its `IsDeleted` column flips from `false` to `true`. Hunting queries should filter on `IsDeleted == false` to ignore deleted indicators.
+
+The DELETE call requires the `subscription_id`, `resourceGroupName` and `workspaceName` keys to be set in `ms_auth`. The API version is configurable via `ms_delete_api_version` in `config.py` (default: `"2025-09-01"`).
+
+Both `--verify-recent-toids-change` and `--delete-outdated-indicators` use this DELETE mechanism.
 
 ### Verifying your configuration
 

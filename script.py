@@ -10,6 +10,7 @@ import sys
 import logging
 import json
 import time
+from urllib.parse import urlparse, parse_qs
 
 from stix2 import parse, exceptions
 import requests
@@ -80,65 +81,49 @@ def _refresh_sentinel_session(session, expiry, rm):
     return expiry
 
 
-def _revoke_indicators(indicators, session, rm, expiry):
-    if not indicators:
-        return 0, expiry
+def _extract_skip_token(body):
+    next_link = body.get("nextLink")
+    if next_link:
+        qs = parse_qs(urlparse(next_link).query)
+        token = qs.get("$skipToken") or qs.get("skipToken")
+        if token:
+            return token[0]
+    return body.get("skipToken")
 
-    workspace_id = config.ms_auth["workspace_id"]
-    api_version = config.ms_api_version
-    if config.ms_auth["new_upload_api"]:
-        upload_url = f"https://api.ti.sentinel.azure.com/workspaces/{workspace_id}/threat-intelligence-stix-objects:upload?api-version={api_version}"
-        indicator_value_key = "stixobjects"
-    else:
-        upload_url = f"https://sentinelus.azure-api.net/{workspace_id}/threatintelligence:upload-indicators?api-version={api_version}"
-        indicator_value_key = "value"
 
-    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-    stix_objects = []
-    for ind in indicators:
-        props = ind.get("properties", {})
-        external_id = props.get("externalId", "")
-        if not external_id:
-            name = ind.get("name", "")
-            if name:
-                external_id = f"indicator--{name}"
-            else:
-                logger.warning("Skipping indicator without externalId or name")
-                continue
-
-        stix_obj = {
-            "type": "indicator",
-            "spec_version": "2.1",
-            "id": external_id,
-            "created": props.get("created", now),
-            "modified": now,
-            "pattern": props.get("pattern", "[ipv4-addr:value = '0.0.0.0']"),
-            "pattern_type": "stix",
-            "valid_from": props.get("validFrom", now),
-            "revoked": True
-        }
-        stix_objects.append(stix_obj)
-
-    if not stix_objects:
-        return 0, expiry
-
-    revoked_count = 0
-    for i in range(0, len(stix_objects), 100):
-        batch = stix_objects[i:i + 100]
-        expiry = _refresh_sentinel_session(session, expiry, rm)
-
-        body = {"sourcesystem": config.sourcesystem, indicator_value_key: batch}
+def _delete_sentinel_indicator(name, session):
+    url = (
+        f"https://management.azure.com/subscriptions/{config.ms_auth.get('subscription_id')}"
+        f"/resourceGroups/{config.ms_auth.get('resourceGroupName')}"
+        f"/providers/Microsoft.OperationalInsights/workspaces/{config.ms_auth.get('workspaceName')}"
+        f"/providers/Microsoft.SecurityInsights/threatIntelligence/main/indicators/{name}"
+        f"?api-version={config.ms_delete_api_version}"
+    )
+    for attempt in range(4):
         try:
-            resp = session.post(upload_url, json=body, timeout=60)
-            logger.debug("Revoke upload response: %s %s", resp.status_code, resp.text[:500] if resp.text else "(empty)")
-            if resp.status_code == 200:
-                revoked_count += len(batch)
-            else:
-                logger.error("Error revoking indicators (batch %d): %s %s", i // 100, resp.status_code, resp.text[:500] if resp.text else "(empty)")
-        except Exception as e:
-            logger.error("Exception revoking indicators (batch %d): %s", i // 100, e)
-
-    return revoked_count, expiry
+            resp = session.delete(url, timeout=30)
+        except requests.exceptions.RequestException as e:
+            logger.error("Exception deleting indicator {}: {}".format(name, e))
+            return False
+        if resp.status_code in (200, 204):
+            return True
+        if resp.status_code == 404:
+            logger.debug("Indicator {} already gone (404)".format(name))
+            return True
+        if resp.status_code == 429:
+            retry_after = resp.headers.get("Retry-After")
+            try:
+                wait = float(retry_after) if retry_after else 2 ** attempt
+            except ValueError:
+                wait = 2 ** attempt
+            logger.warning("Rate-limited deleting {} (attempt {}), sleeping {}s".format(name, attempt + 1, wait))
+            time.sleep(wait)
+            continue
+        logger.error("Failed to delete indicator {}: {} {}".format(
+            name, resp.status_code, resp.text[:300] if resp.text else ""))
+        return False
+    logger.error("Giving up deleting indicator {} after repeated 429s".format(name))
+    return False
 
 
 def get_misp_toids_disabled(timeframe):
@@ -169,18 +154,18 @@ def delete_indicators_from_sentinel(values):
     session, expiry = _get_sentinel_session(rm)
     if not session:
         logger.error("Could not get Sentinel access token for to_ids verification")
-        return
+        return 0, 0
 
     url = (
         f"https://management.azure.com/subscriptions/{config.ms_auth.get('subscription_id')}"
         f"/resourceGroups/{config.ms_auth.get('resourceGroupName')}"
         f"/providers/Microsoft.OperationalInsights/workspaces/{config.ms_auth.get('workspaceName')}"
         f"/providers/Microsoft.SecurityInsights/threatIntelligence/main/queryIndicators"
-        f"?api-version=2025-09-01"
+        f"?api-version={config.ms_delete_api_version}"
     )
 
     values_set = set(values)
-    to_revoke = {}
+    to_delete = {}  # value -> indicator name
 
     skip_token = None
     while True:
@@ -206,41 +191,43 @@ def delete_indicators_from_sentinel(values):
             pattern = indicator.get("properties", {}).get("pattern", "")
             for v in list(values_set):
                 if "'{}'".format(v) in pattern:
-                    to_revoke[v] = indicator
+                    to_delete[v] = indicator.get("name")
                     values_set.discard(v)
 
         if not values_set:
             break
 
-        skip_token = body.get("nextLink") or body.get("skipToken")
+        skip_token = _extract_skip_token(body)
         if not skip_token:
             break
 
-    if config.dry_run:
-        for attr_value, indicator in to_revoke.items():
-            logger.info("Dry run - would revoke from Sentinel: {} ({})".format(attr_value, indicator.get("name")))
-        revoked_count = len(to_revoke)
-    elif to_revoke:
-        indicator_list = list(to_revoke.values())
-        revoked_count, expiry = _revoke_indicators(indicator_list, session, rm, expiry)
-        for attr_value in to_revoke:
-            logger.info("Revoked from Sentinel: {}".format(attr_value))
-    else:
-        revoked_count = 0
+    deleted_count = 0
+    for attr_value, indicator_name in to_delete.items():
+        if not indicator_name:
+            continue
+        if config.dry_run:
+            logger.info("Dry run - would delete from Sentinel: {} ({})".format(attr_value, indicator_name))
+            deleted_count += 1
+            continue
+        expiry = _refresh_sentinel_session(session, expiry, rm)
+        if _delete_sentinel_indicator(indicator_name, session):
+            logger.info("Deleted from Sentinel: {} ({})".format(attr_value, indicator_name))
+            deleted_count += 1
 
     not_found_count = len(values_set)
     for v in values_set:
         logger.debug("Not found in Sentinel: {}".format(v))
 
-    logger.info("to_ids verification complete: {} revoked, {} not found in Sentinel".format(revoked_count, not_found_count))
+    logger.info("to_ids verification complete: {} deleted, {} not found in Sentinel".format(deleted_count, not_found_count))
+    return deleted_count, not_found_count
 
 
 def verify_recent_toids_change():
     values = get_misp_toids_disabled(config.timeframe_toids_change)
     if values:
-        delete_indicators_from_sentinel(values)
-    else:
-        logger.info("No indicators to delete from Sentinel based on to_ids change")
+        return delete_indicators_from_sentinel(values)
+    logger.info("No indicators to delete from Sentinel based on to_ids change")
+    return 0, 0
 
 
 def delete_outdated_indicators():
@@ -248,33 +235,36 @@ def delete_outdated_indicators():
     session, expiry = _get_sentinel_session(rm)
     if not session:
         logger.error("Could not get Sentinel access token for outdated indicator deletion")
-        return
+        return 0, 0
 
     url = (
         f"https://management.azure.com/subscriptions/{config.ms_auth.get('subscription_id')}"
         f"/resourceGroups/{config.ms_auth.get('resourceGroupName')}"
         f"/providers/Microsoft.OperationalInsights/workspaces/{config.ms_auth.get('workspaceName')}"
         f"/providers/Microsoft.SecurityInsights/threatIntelligence/main/queryIndicators"
-        f"?api-version=2025-09-01"
+        f"?api-version={config.ms_delete_api_version}"
     )
 
     now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    total_revoked = 0
-    revoked_ids = set()
-    consecutive_all_seen = 0
-    max_consecutive_all_seen = 3
+    payload = {
+        "sources": [config.sourcesystem],
+        "maxValidUntil": now,
+        "includeDisabled": False,
+        "pageSize": 100,
+    }
+
+    processed_names = set()
+    total_deleted = 0
+    total_failed = 0
+    skip_token = None
 
     while True:
         expiry = _refresh_sentinel_session(session, expiry, rm)
-        payload = {
-            "sources": [config.sourcesystem],
-            "maxValidUntil": now,
-            "includeDisabled": True,
-            "pageSize": 100
-        }
-
+        page_payload = dict(payload)
+        if skip_token:
+            page_payload["skipToken"] = skip_token
         try:
-            resp = session.post(url, json=payload, timeout=60)
+            resp = session.post(url, json=page_payload, timeout=60)
             if resp.status_code != 200:
                 logger.error("Error querying outdated Sentinel indicators: {}".format(resp.status_code))
                 break
@@ -287,47 +277,43 @@ def delete_outdated_indicators():
         if not indicators:
             break
 
-        new_indicators = [i for i in indicators if i.get("name", "") not in revoked_ids]
+        new_in_batch = 0
+        for indicator in indicators:
+            name = indicator.get("name", "")
+            if not name or name in processed_names:
+                continue
+            processed_names.add(name)
+            new_in_batch += 1
 
-        if not new_indicators:
-            consecutive_all_seen += 1
-            wait_time = min(30 * consecutive_all_seen, 120)
-            logger.info("All {} returned indicators already revoked (attempt {}/{}), waiting {}s for Sentinel to catch up...".format(
-                len(indicators), consecutive_all_seen, max_consecutive_all_seen, wait_time))
-            if consecutive_all_seen >= max_consecutive_all_seen:
-                logger.info("Sentinel still returning already-revoked indicators after {} retries, stopping".format(max_consecutive_all_seen))
-                break
-            time.sleep(wait_time)
-            continue
+            props = indicator.get("properties", {})
+            pattern = props.get("pattern", "")
+            valid_until = props.get("validUntil", "")
 
-        consecutive_all_seen = 0
+            if config.dry_run:
+                logger.info("Dry run - would delete outdated indicator: {} (validUntil: {}, pattern: {})".format(
+                    name, valid_until, pattern))
+                continue
 
-        if config.dry_run:
-            for indicator in new_indicators:
-                indicator_name = indicator.get("name", "")
-                pattern = indicator.get("properties", {}).get("pattern", "")
-                valid_until = indicator.get("properties", {}).get("validUntil", "")
-                logger.info("Dry run - would revoke outdated indicator: {} (validUntil: {}, pattern: {})".format(indicator_name, valid_until, pattern))
+            logger.info("Deleting: {} (validUntil: {}, pattern: {})".format(name, valid_until, pattern))
+            expiry = _refresh_sentinel_session(session, expiry, rm)
+            if _delete_sentinel_indicator(name, session):
+                total_deleted += 1
+            else:
+                total_failed += 1
+
+        skip_token = _extract_skip_token(body)
+        if not skip_token:
             break
-
-        for indicator in new_indicators:
-            indicator_name = indicator.get("name", "")
-            pattern = indicator.get("properties", {}).get("pattern", "")
-            valid_until = indicator.get("properties", {}).get("validUntil", "")
-            logger.info("Revoking: {} (validUntil: {}, pattern: {})".format(indicator_name, valid_until, pattern))
-            revoked_ids.add(indicator_name)
-
-        revoked_count, expiry = _revoke_indicators(new_indicators, session, rm, expiry)
-        total_revoked += revoked_count
-        skipped = len(indicators) - len(new_indicators)
-        logger.info("Batch revoked: {} new, {} skipped as already revoked (total so far: {}), waiting 15s...".format(
-            revoked_count, skipped, total_revoked))
-        time.sleep(15)
+        if new_in_batch == 0 and not config.dry_run:
+            # In live mode the deletes shrink the result set, so a page with no
+            # new names means Sentinel is still serving a stale view; stop here.
+            break
 
     if config.dry_run:
         logger.info("Outdated indicator cleanup complete (dry run)")
     else:
-        logger.info("Outdated indicator cleanup: {} total revoked via upload API".format(total_revoked))
+        logger.info("Outdated indicator cleanup: {} deleted, {} failed".format(total_deleted, total_failed))
+    return total_deleted, total_failed
 
 
 def get_misp_events_upload_indicators(event_uuid=None):
@@ -485,6 +471,8 @@ def init_configuration():
         config.ms_check_if_exist_in_sentinel = False
     if not hasattr(config, "timeframe_toids_change"):
         config.timeframe_toids_change = "1d"
+    if not hasattr(config, "ms_delete_api_version"):
+        config.ms_delete_api_version = "2025-09-01"
 
 
 
@@ -520,6 +508,8 @@ def main():
                         help="Delete expired indicators from Sentinel")
     args = parser.parse_args()
 
+    run_start = datetime.datetime.now(datetime.timezone.utc)
+
     event_uuid = None
     if args.uuid:
         try:
@@ -532,11 +522,15 @@ def main():
 
     if args.verify_recent_toids_change:
         logger.info("Running to_ids verification")
-        verify_recent_toids_change()
+        toids_deleted, toids_not_found = verify_recent_toids_change()
+    else:
+        toids_deleted, toids_not_found = 0, 0
 
     if args.delete_outdated_indicators:
         logger.info("Running outdated indicator cleanup")
-        delete_outdated_indicators()
+        outdated_deleted, outdated_failed = delete_outdated_indicators()
+    else:
+        outdated_deleted, outdated_failed = 0, 0
 
     logger.info("Fetching and parsing data from MISP {}".format(config.misp_domain))
     logger.info("Using Microsoft Upload Indicator API")
@@ -544,6 +538,19 @@ def main():
     logger.info("Pushed {} indicators from MISP to Sentinel".format(total_indicators))
     if config.ms_check_if_exist_in_sentinel:
         logger.info("Skipped {} MISP indicators because they were already in Sentinel".format(indicator_count_match_sentinel))
+
+    duration = datetime.datetime.now(datetime.timezone.utc) - run_start
+    logger.info("====== Run statistics ======")
+    logger.info("  Duration                              : {}".format(str(duration).split(".")[0]))
+    logger.info("  Dry run                               : {}".format(bool(config.dry_run)))
+    logger.info("  Indicators pushed to Sentinel         : {}".format(total_indicators))
+    if config.ms_check_if_exist_in_sentinel:
+        logger.info("  Indicators skipped (already present)  : {}".format(indicator_count_match_sentinel))
+    if args.verify_recent_toids_change:
+        logger.info("  to_ids deletions (deleted/not found)  : {} / {}".format(toids_deleted, toids_not_found))
+    if args.delete_outdated_indicators:
+        logger.info("  Outdated deletions (deleted/failed)   : {} / {}".format(outdated_deleted, outdated_failed))
+    logger.info("============================")
 
 
 if __name__ == '__main__':

@@ -151,6 +151,7 @@ class RequestManager:
             if not access_token:
                 raise RuntimeError("Failed to refresh access token")
             self.headers = {"Authorization": f"Bearer {access_token}", "user-agent": config.ms_useragent, "content-type": "application/json"}
+            self.headers_expiration_time = self._get_timestamp() + 3500
 
     @staticmethod
     def _get_timestamp():

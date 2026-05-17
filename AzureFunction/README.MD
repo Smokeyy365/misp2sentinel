@@ -66,6 +66,21 @@ Add the following variables:
 | `mispurl` | Full URL of your MISP instance, e.g. `https://misp.example.com` |
 | `misp_event_filters` | JSON object with the MISP event filters (see [MISP event filters](../README.md#misp-event-filters)). For example: `{"published": 1, "enforceWarninglist": true, "includeEventTags": true, "publish_timestamp": "1d"}` |
 | `timerTriggerSchedule` | Cron expression for the schedule, e.g. `0 */2 * * *` (every two hours). See [Timer trigger for Azure Functions](https://learn.microsoft.com/en-us/azure/azure-functions/functions-bindings-timer?tabs=python-v2%2Cin-process&pivots=programming-language-python). |
+| `local_mode` | Set to `True` to skip TLS verification when talking to MISP (self-signed certificates). Defaults to `False`. |
+
+The following variables are **optional** and only required if you enable the indicator cleanup features (see [Indicator cleanup](#indicator-cleanup)):
+
+| Variable | Value |
+|----------|-------|
+| `subscription_id` | Azure subscription ID hosting the Sentinel workspace. Required for delete operations. |
+| `resource_group_name` | Resource group that contains the Sentinel workspace. Required for delete operations. |
+| `workspace_name` | Name of the Sentinel workspace (not the GUID). Required for delete operations. |
+| `sourcesystem` | `sourceSystem` value that this integration writes to indicators. Defaults to `MISP`. Only indicators with a matching `sourceSystem` are considered for deletion. |
+| `enable_verify_toids_change` | Set to `True` to delete indicators from Sentinel when their MISP attribute is flipped to `to_ids=False`. Defaults to `False`. |
+| `timeframe_toids_change` | MISP lookback window for the `to_ids` check, e.g. `1d`, `12h`, `7d`. Defaults to `1d`. |
+| `enable_delete_outdated_indicators` | Set to `True` to delete indicators whose `validUntil` is in the past. Defaults to `False`. |
+| `dry_run` | Set to `True` to log what would be deleted without actually deleting. Defaults to `False`. |
+| `ms_delete_api_version` | Overrides the management API version used for deletes. Defaults to `2025-09-01`. |
 
 Click **Apply** and then **Confirm** to save.
 
@@ -104,6 +119,29 @@ https://login.microsoftonline.com/common/adminconsent?client_id=<APP_CLIENT_ID>&
 ```
 
 Add a redirect URI (e.g. `https://portal.azure.com`) to the app registration, then add additional entries to the `tenants` secret.
+
+## Indicator cleanup
+
+The Azure Function can also delete indicators from Sentinel, mirroring the standalone script's `--verify-recent-toids-change` and `--delete-outdated-indicators` options. Both are **opt-in** and run before the upload phase on every scheduled invocation.
+
+- **`enable_verify_toids_change`** — queries MISP for attributes whose `to_ids` flag was flipped to `False` within `timeframe_toids_change`, matches them against Sentinel indicators (by pattern value) and deletes the matches.
+- **`enable_delete_outdated_indicators`** — deletes Sentinel indicators whose `validUntil` is in the past.
+
+Both features call the Microsoft Sentinel management API directly, so they require `subscription_id`, `resource_group_name` and `workspace_name` in addition to the workspace GUID. The app registration also needs **Microsoft Sentinel Contributor** on the workspace (the same role already required for uploads).
+
+Use `dry_run=True` first to confirm the expected scope. Statistics for both features are written to the run summary in the log:
+
+```
+====== Run statistics ======
+  Duration                              : 0:00:42
+  Dry run                               : False
+  Indicators pushed to Sentinel         : 1234
+  to_ids deletions (deleted/not found)  : 5 / 2
+  Outdated deletions (deleted/failed)   : 41 / 0
+============================
+```
+
+Deleted indicators are removed from `ThreatIntelligenceIndicator` in Log Analytics; the corresponding row receives `IsDeleted = true` (visible for the workspace retention window).
 
 ## Troubleshooting
 

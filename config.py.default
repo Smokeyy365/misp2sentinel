@@ -36,7 +36,8 @@ ms_auth = {
     #'workspaceName': '<workspace_name>',
 }
 
-ms_api_version = "2024-02-01-preview"
+ms_api_version = "2024-02-01-preview"           # STIX Objects upload API version
+ms_delete_api_version = "2025-09-01"            # Management API version used to delete indicators
 ms_max_indicators_request = 100     # Max 100 indicators per request
 ms_max_requests_minute = 100        # Max 100 requests per minute
 
@@ -56,7 +57,7 @@ misp_event_filters = {
     "publish_timestamp": "14d",
 }
 
-misp_event_limit_per_page = 100
+misp_event_limit_per_page = 500
 
 
 ####
