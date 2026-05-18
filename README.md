@@ -163,7 +163,7 @@ misp_event_filters = {
 ### Pagination
 
 ```python
-misp_event_limit_per_page = 100
+misp_event_limit_per_page = 500
 ```
 
 This setting controls how many events are fetched per MISP query. Lower it if the script consumes too much memory.
@@ -214,16 +214,16 @@ remove_pipe_from_misp_attribute = True  # Strip composite attributes (e.g. filen
 ignore_localtags = True             # Skip MISP tags marked as local
 misp_flatten_attributes = True      # Flatten MISP object attributes into the event attribute list
 misp_remove_eventreports = True     # Remove event reports from MISP events before processing
+timeframe_toids_change = "1d"           # Timeframe for --verify-recent-toids-change
 ms_useragent = "MISP-1.0"           # User-Agent header sent to the Sentinel API
 ms_check_if_exist_in_sentinel = False   # Check if an indicator already exists in Sentinel before uploading
-timeframe_toids_change = "1d"           # Timeframe for --verify-recent-toids-change
 ```
 
 - `write_parsed_eventid`: When set to `True`, the script logs the event IDs it processes. Useful for debugging which events are being picked up by the filters.
 - `misp_remove_eventreports`: When set to `True`, event reports attached to MISP events are stripped before processing. Defaults to `True`.
+- `timeframe_toids_change`: The MISP search timeframe used by `--verify-recent-toids-change`. Defaults to `"1d"`. Accepts the same formats as MISP timestamps (e.g. `"12h"`, `"7d"`).
 - `ms_useragent`: The User-Agent string sent with API requests. Defaults to `"MISP-1.0"`.
 - `ms_check_if_exist_in_sentinel`: When set to `True`, the script checks whether each indicator already exists in Sentinel before uploading. This avoids duplicates but adds an API call per indicator, which slows down the synchronisation. Requires `subscription_id`, `resourceGroupName` and `workspaceName` in `ms_auth` (see the [deleting indicators](#deleting-indicators-when-to_ids-changes) section).
-- `timeframe_toids_change`: The MISP search timeframe used by `--verify-recent-toids-change`. Defaults to `"1d"`. Accepts the same formats as MISP timestamps (e.g. `"12h"`, `"7d"`).
 
 ## Running the script
 
