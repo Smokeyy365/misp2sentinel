@@ -316,6 +316,52 @@ def delete_outdated_indicators():
     return total_deleted, total_failed
 
 
+def init_decaying_cache(misp):
+    logger.info("Querying MISP for attribute decay scores")
+
+    results = misp.search(controller='attributes',
+                          to_ids=1,
+                          decayingModel=str(config.misp_decaying_model),
+                          includeDecayScore=True,
+                          type_attribute=list(UPLOAD_INDICATOR_MISP_ACCEPTED_TYPES),
+                          return_format='json')
+
+    if isinstance(results, list):
+        attributes = results
+    elif isinstance(results, dict):
+        attributes = results.get("Attribute") or results.get("response", {}).get("Attribute", [])
+    else:
+        attributes = []
+
+    decaying_cache = {}
+
+    for attribute in attributes:
+        attribute_uuid = attribute.get("uuid")
+        if not attribute_uuid:
+            continue
+
+        score = None
+        try:
+            score = float(attribute.get("decay_score", [{}])[0].get("score"))
+        except Exception:
+            pass
+
+        # If the same attribute UUID is returned multiple times, we keep
+        # the highest decay score found for that UUID.
+        current_score = decaying_cache.get(attribute_uuid)
+        if current_score is None or (score is not None and score > current_score):
+            decaying_cache[attribute_uuid] = score
+
+    logger.info("Initialized MISP decaying cache with {} unique attribute UUIDs".format(len(decaying_cache)))
+    return decaying_cache    
+
+
+def get_decaying_score(attribute_uuid, decaying_cache):
+    if not decaying_cache:
+        return None
+    return decaying_cache.get(attribute_uuid, None)
+
+
 def get_misp_events_upload_indicators(event_uuid=None):
     misp = PyMISP(config.misp_domain, config.misp_key, config.misp_verifycert, False)
     
@@ -324,6 +370,12 @@ def get_misp_events_upload_indicators(event_uuid=None):
         logger.info("Using event UUID filter: {}".format(event_uuid))
     else:
         misp_event_filters = config.misp_event_filters
+
+    use_decaying_score = False
+    decaying_cache = None
+    if config.misp_decaying_score_as_confidence or config.misp_decaying_score_threshold is not None:
+        use_decaying_score = True
+        decaying_cache = init_decaying_cache(misp)
     
     logger.debug("Query MISP for events")
     remaining_misp_pages = True
@@ -368,7 +420,23 @@ def get_misp_events_upload_indicators(event_uuid=None):
                             if element.get("to_ids", False) and \
                                         element.get("type", "") in UPLOAD_INDICATOR_MISP_ACCEPTED_TYPES:
 
+                                decaying_score = None
+                                if use_decaying_score:
+                                    decaying_score = get_decaying_score(element.get("uuid", ""), decaying_cache)
+                                    if (
+                                        config.misp_decaying_score_threshold is not None
+                                        and decaying_score is not None
+                                        and decaying_score <= config.misp_decaying_score_threshold
+                                    ):
+                                        if config.verbose_log:
+                                                logger.debug("Skipping indicator {} due to low decay score ({})".format(
+                                                    element.get("value"), decaying_score
+                                                ))
+                                        continue
+
                                 misp_indicator = RequestObject_Indicator(element, misp_event, logger)
+                                if config.misp_decaying_score_as_confidence and decaying_score is not None:
+                                    misp_indicator.confidence = max(0, min(100, int(round(decaying_score))))
                                 #print(misp_indicator._get_dict())
                                 if misp_indicator.valid_until:
                                     try:
@@ -403,6 +471,8 @@ def get_misp_events_upload_indicators(event_uuid=None):
                                         if not skip_to_sentinel:
                                             if config.verbose_log:
                                                 logger.debug("Add {} to list of indicators to upload".format(misp_indicator.pattern))
+                                                if config.misp_decaying_score_as_confidence:
+                                                    logger.debug("Confidence from decaying score: {}".format(misp_indicator.confidence))
                                             result_set.append(misp_indicator._get_dict())
                                             indicator_values.append(element["value"])
                                     except exceptions.STIXError as e:
@@ -473,7 +543,12 @@ def init_configuration():
         config.timeframe_toids_change = "1d"
     if not hasattr(config, "ms_delete_api_version"):
         config.ms_delete_api_version = "2025-09-01"
-
+    if not hasattr(config, "misp_decaying_score_as_confidence"):
+        config.misp_decaying_score_as_confidence = False
+    if not hasattr(config, "misp_decaying_score_threshold"):
+        config.misp_decaying_score_threshold = None
+    if not hasattr(config, "misp_decaying_model"):
+        config.misp_decaying_model = 1
 
 
 global _build_logger

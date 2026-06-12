@@ -200,6 +200,37 @@ default_confidence = 50
 
 Sets the default STIX confidence value (0-100) for indicators. This can be overridden per indicator through MISP tags that use the `misp-confidence` taxonomy.
 
+#### MISP Decay Model integration
+
+If your MISP instance uses the [Decay Model](https://www.misp-project.org/2019/09/12/Decaying-Of-Indicators.html/), the connector can request attribute decay scores for a specific MISP decaying model, use the returned score as the confidence value sent to Sentinel, and optionally exclude indicators whose score has fallen below a threshold.
+
+```python
+misp_decaying_model = 1                     # MISP decaying model ID used for attribute decay scores
+misp_decaying_score_as_confidence = False   # Use the MISP decay score as the Sentinel confidence value
+misp_decaying_score_threshold = None        # Set to None to disable decay score-based filtering
+                                            # Set to a value >= 0 to exclude indicators with a decay score <= this threshold
+                                            # Example: 10 excludes indicators with a decay score of 10 or lower
+```
+- `misp_decaying_model`: MISP decaying model ID used when requesting attribute decay scores. The default is `1`. Available model IDs can be listed in MISP under `/decayingModel/index`.
+- `misp_decaying_score_as_confidence`: When set to `True`, the MISP decay score of an attribute is used as the STIX confidence value (0-100) sent to Sentinel.
+- `misp_decaying_score_threshold`: Attributes with a decay score less than or equal to this value are excluded from upload. Set it to `None` (default) to disable this filtering entirely. Set it to `0` to exclude indicators whose decay score has reached zero (fully decayed). A typical starting value is `10`.
+
+> **Note:** The default decaying model ID is `1`. Decaying model IDs are instance-specific, so if your MISP instance uses another model you should update `misp_decaying_model` accordingly. You can list available models in MISP at `/decayingModel/index`.
+
+**Priority order for confidence (highest to lowest):**
+
+| Priority | Source | Condition |
+|---|---|---|
+| 1 | MISP decay score | `misp_decaying_score_as_confidence = True` and a score is available |
+| 2 | MISP `misp-confidence` taxonomy tag | Tag present and no decay score applied |
+| 3 | `default_confidence` | Fallback when neither of the above applies |
+
+> **Note:** When `misp_decaying_score_as_confidence` is set to `True`, the decay score takes precedence over any `misp-confidence` taxonomy tag, if a score is available. If no decay score is returned for an attribute, the script falls back to the confidence derived from MISP tags, or to `default_confidence` if no confidence tag is present.
+>
+> **Note:** Threshold filtering only applies when a decay score is available. Attributes without a decay score are not excluded by `misp_decaying_score_threshold`.
+>
+> **Note:** If MISP returns the same attribute UUID multiple times, the script keeps the highest decay score found for that UUID.
+
 ### Other settings
 
 ```python
@@ -348,6 +379,7 @@ To get the most out of the Sentinel integration, enable the following MISP taxon
 - [MISP taxonomy](https://www.misp-project.org/taxonomies.html#_misp) (used for confidence levels)
 - [sentinel-threattype](https://www.misp-project.org/taxonomies.html#_sentinel_threattype) (mapped to STIX `indicator_types`)
 - [kill-chain](https://www.misp-project.org/taxonomies.html#_kill_chain) (mapped to STIX kill chain phases)
+- [Decay Model](https://www.misp-project.org/2019/09/12/Decaying-Of-Indicators.html/) (optional — used for decay-score-based confidence and filtering)
 
 These taxonomies are not required for the integration to work, but they add useful context for analysts working with the indicators in Sentinel.
 
@@ -356,6 +388,7 @@ These taxonomies are not required for the integration to work, but they add usef
 #### Confidence level
 
 The default confidence value (set in `default_confidence`) can be overridden per indicator using the MISP confidence taxonomy. The tag is translated to a numerical value as defined by `MISP_CONFIDENCE` in `constants.py`.
+If `misp_decaying_score_as_confidence` is enabled and a decay score is available for the attribute, the decay score overrides the confidence derived from the taxonomy tag.
 
 ![docs/Taxonomies_-_MISP.png](docs/Taxonomies_-_MISP.png)
 
@@ -437,6 +470,23 @@ Check the following:
 - Is the `to_ids` flag set to `True` on the attribute?
 - Is the attribute type one of the supported types (listed in `UPLOAD_INDICATOR_MISP_ACCEPTED_TYPES` in `constants.py`)?
 - Has the `valid_until` date already passed? Expired indicators are skipped.
+
+### My indicators are being skipped unexpectedly
+
+If indicators that have `to_ids = True` are not being uploaded, check whether `misp_decaying_score_threshold` is set to a value other than `None`. Attributes with a decay score less than or equal to this threshold are excluded from the upload. Set it to `None` to disable this filtering entirely, or lower the threshold value.
+
+Also verify that `misp_decaying_model` matches a valid decaying model ID on your MISP instance. The default is `1`, but another model may be more appropriate depending on your configuration.
+
+You can enable `verbose_log = True` to see which indicators are being skipped and why.
+
+### My indicators all have the same confidence value
+
+If all indicators show `default_confidence` in Sentinel despite having decay scores in MISP, check the following:
+
+- Is `misp_decaying_score_as_confidence` set to `True` in `config.py`?
+- Does the MISP API response include a `decay_score` entry for the attributes, with a usable `score` value?
+- Is the Decay Model enabled in MISP and applied to the events you are synchronising?
+- Is `misp_decaying_model` set to a valid decaying model ID for your MISP instance?
 
 ### Error: KeyError: 'access_token'
 

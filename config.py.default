@@ -67,6 +67,14 @@ ignore_localtags = True
 
 default_confidence = 50
 
+misp_decaying_model = 1                     # MISP decaying model ID used for attribute decay scores. Available id models are visible in MISP at https://__IP__/decayingModel/index
+misp_decaying_score_as_confidence = False   # Use the MISP decay score as the Sentinel confidence value
+misp_decaying_score_threshold = None        # Set to None to disable decay score-based filtering
+                                            # Set to a value >= 0 to exclude indicators with a decay score <= this threshold
+                                            # Example: 10 excludes indicators with a decay score of 10 or lower
+
+
+
 days_to_expire = 50
 days_to_expire_start = "valid_from" # Start counting from "valid_from" or "current_date"
 days_to_expire_mapping = {          # Per-type overrides for days_to_expire
