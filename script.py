@@ -319,41 +319,54 @@ def delete_outdated_indicators():
 def init_decaying_cache(misp):
     logger.info("Querying MISP for attribute decay scores")
 
-    results = misp.search(controller='attributes',
-                          to_ids=1,
-                          decayingModel=str(config.misp_decaying_model),
-                          includeDecayScore=True,
-                          type_attribute=list(UPLOAD_INDICATOR_MISP_ACCEPTED_TYPES),
-                          return_format='json')
-
-    if isinstance(results, list):
-        attributes = results
-    elif isinstance(results, dict):
-        attributes = results.get("Attribute") or results.get("response", {}).get("Attribute", [])
-    else:
-        attributes = []
-
     decaying_cache = {}
+    misp_page = 1
+    remaining_misp_pages = True
+    page_size = 10000
 
-    for attribute in attributes:
-        attribute_uuid = attribute.get("uuid")
-        if not attribute_uuid:
+    while remaining_misp_pages:
+        results = misp.search(
+            controller='attributes',
+            to_ids=1,
+            decayingModel=str(config.misp_decaying_model),
+            includeDecayScore=True,
+            type_attribute=list(UPLOAD_INDICATOR_MISP_ACCEPTED_TYPES),
+            return_format='json',
+            limit=page_size,
+            page=misp_page
+        )
+
+        if isinstance(results, list):
+            attributes = results
+        elif isinstance(results, dict):
+            attributes = results.get("Attribute") or results.get("response", {}).get("Attribute", [])
+        else:
+            attributes = []
+
+        if not attributes:
+            remaining_misp_pages = False
             continue
 
-        score = None
-        try:
-            score = float(attribute.get("decay_score", [{}])[0].get("score"))
-        except Exception:
-            pass
+        for attribute in attributes:
+            attribute_uuid = attribute.get("uuid")
+            if not attribute_uuid:
+                continue
 
-        # If the same attribute UUID is returned multiple times, we keep
-        # the highest decay score found for that UUID.
-        current_score = decaying_cache.get(attribute_uuid)
-        if current_score is None or (score is not None and score > current_score):
-            decaying_cache[attribute_uuid] = score
+            score = None
+            try:
+                score = float(attribute.get("decay_score", [{}])[0].get("score"))
+            except Exception:
+                pass
+
+            current_score = decaying_cache.get(attribute_uuid)
+            if current_score is None or (score is not None and score > current_score):
+                decaying_cache[attribute_uuid] = score
+
+        remaining_misp_pages = len(attributes) == page_size
+        misp_page += 1
 
     logger.info("Initialized MISP decaying cache with {} unique attribute UUIDs".format(len(decaying_cache)))
-    return decaying_cache    
+    return decaying_cache
 
 
 def get_decaying_score(attribute_uuid, decaying_cache):
