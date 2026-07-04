@@ -316,16 +316,17 @@ def delete_outdated_indicators():
     return total_deleted, total_failed
 
 
-def init_decaying_cache(misp):
+def init_decaying_cache(misp, event_uuid=None):
     logger.info("Querying MISP for attribute decay scores")
 
     decaying_cache = {}
     misp_page = 1
     remaining_misp_pages = True
     page_size = 10000
+    missing_score_count = 0
 
     while remaining_misp_pages:
-        results = misp.search(
+        search_kwargs = dict(
             controller='attributes',
             to_ids=1,
             decayingModel=str(config.misp_decaying_model),
@@ -335,6 +336,12 @@ def init_decaying_cache(misp):
             limit=page_size,
             page=misp_page
         )
+        # When processing a single event, scope the decay query to that event
+        # instead of scanning every attribute in the MISP instance.
+        if event_uuid:
+            search_kwargs["eventid"] = event_uuid
+
+        results = misp.search(**search_kwargs)
 
         if isinstance(results, list):
             attributes = results
@@ -355,8 +362,8 @@ def init_decaying_cache(misp):
             score = None
             try:
                 score = float(attribute.get("decay_score", [{}])[0].get("score"))
-            except Exception:
-                pass
+            except (TypeError, ValueError, IndexError, AttributeError):
+                missing_score_count += 1
 
             current_score = decaying_cache.get(attribute_uuid)
             if current_score is None or (score is not None and score > current_score):
@@ -366,6 +373,8 @@ def init_decaying_cache(misp):
         misp_page += 1
 
     logger.info("Initialized MISP decaying cache with {} unique attribute UUIDs".format(len(decaying_cache)))
+    if missing_score_count:
+        logger.debug("No usable decay score for {} attribute(s) with decaying model {}. ".format(missing_score_count, config.misp_decaying_model))
     return decaying_cache
 
 
@@ -388,7 +397,7 @@ def get_misp_events_upload_indicators(event_uuid=None):
     decaying_cache = None
     if config.misp_decaying_score_as_confidence or config.misp_decaying_score_threshold is not None:
         use_decaying_score = True
-        decaying_cache = init_decaying_cache(misp)
+        decaying_cache = init_decaying_cache(misp, event_uuid)
     
     logger.debug("Query MISP for events")
     remaining_misp_pages = True
