@@ -2,169 +2,529 @@ from pymisp import *
 import config
 from collections import defaultdict
 import datetime
+import argparse
 from RequestManager import RequestManager
-from RequestObject import RequestObject, RequestObject_Event, RequestObject_Indicator
+from RequestObject import RequestObject_Event, RequestObject_Indicator
 from constants import *
 import sys
-from functools import reduce
-import os
-import datetime
-from datetime import datetime, timedelta, timezone
 import logging
-import requests
 import json
+import time
+from urllib.parse import urlparse, parse_qs
 
-from misp_stix_converter import MISPtoSTIX21Parser
-from stix2.base import STIXJSONEncoder
+from stix2 import parse, exceptions
+import requests
+import uuid
 
 if config.misp_verifycert is False:
     import urllib3
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+def already_in_sentinel(stix_pattern, session):
+    pattern = stix_pattern.split('=')[0].strip().replace('[', '').replace(']', '').replace(":value", "")
+    if "hashes" in pattern:
+        pattern = pattern.split(":")[0].strip()
+    value = stix_pattern.split('=')[1].strip().replace('[', '').replace(']', '')
+    
+    if not session:
+        return False
 
-def _get_events():
-    misp = PyMISP(config.misp_domain, config.misp_key, config.misp_verifycert)
-    if len(config.misp_event_filters) == 0:
-        return [event['Event'] for event in misp.search(controller='events', return_format='json')]
-    events_for_each_filter = [
-        [event['Event'] for event in misp.search(controller='events', return_format='json', **config.misp_event_filters)]
-    ]
-    event_ids_for_each_filter = [set(event['id'] for event in events) for events in events_for_each_filter]
-    event_ids_intersection = reduce((lambda x, y: x & y), event_ids_for_each_filter)
-    return [event for event in events_for_each_filter[0] if event['id'] in event_ids_intersection]
+    try:
+        url = f"https://management.azure.com/subscriptions/{config.ms_auth.get('subscription_id')}/resourceGroups/{config.ms_auth.get('resourceGroupName')}/providers/Microsoft.OperationalInsights/workspaces/{config.ms_auth.get('workspaceName')}/providers/Microsoft.SecurityInsights/threatIntelligence/main/queryIndicators?api-version=2025-09-01"
+        payload = {"keywords": value,
+                   "pageSize": 1,
+                   "includeDisabled": False,
+                   "patternTypes": [pattern]}
+        resp = session.post(url, json=payload, timeout=50)
+        if resp.status_code != 200:
+            return False
 
+        try:
+            body = resp.json()
+        except Exception:
+            return False
 
-def _graph_post_request_body_generator(parsed_events):
-    for event in parsed_events:
-        request_body_metadata = {
-            **{field: event[field] for field in REQUIRED_GRAPH_METADATA},
-            **{field: event[field] for field in OPTIONAL_GRAPH_METADATA if field in event},
-            'action': config.ms_action,
-            'passiveOnly': config.ms_passiveonly,
-            'targetProduct': config.ms_target_product,
-        }
-
-        if len(request_body_metadata.get('threatType', [])) < 1:
-            request_body_metadata['threatType'] = 'watchlist'
-        if config.default_confidence:
-            request_body_metadata["confidence"] = config.default_confidence
-        for request_object in event['request_objects']:
-            request_body = {
-                **request_body_metadata.copy(),
-                **request_object.__dict__,
-                'tags': request_body_metadata.copy()['tags'] + request_object.__dict__['tags'],
-            }
-            yield request_body
+        if isinstance(body, dict):
+            if body.get("value"):
+                return len(body.get("value")) > 0
+            if body.get("results"):
+                return len(body.get("results")) > 0
+        return False
+    except Exception:
+        return False
 
 
-def _handle_timestamp(parsed_event):
-    parsed_event['lastReportedDateTime'] = str(
-        datetime.fromtimestamp(int(parsed_event['lastReportedDateTime'])))
+def _get_sentinel_session(rm):
+    access_token = rm._get_access_token(
+        config.ms_auth[TENANT], config.ms_auth[CLIENT_ID], config.ms_auth[CLIENT_SECRET], config.ms_auth[SCOPE]
+    )
+    if not access_token:
+        return None, 0
+    session = requests.Session()
+    session.headers.update({
+        "Authorization": f"Bearer {access_token}",
+        "user-agent": config.ms_useragent,
+        "content-type": "application/json"
+    })
+    expiry = datetime.datetime.now().timestamp() + 3500
+    return session, expiry
 
 
-def _handle_diamond_model(parsed_event):
-    for tag in parsed_event['tags']:
-        if 'diamond-model:' in tag:
-            parsed_event['diamondModel'] = tag.split(':')[1]
+def _refresh_sentinel_session(session, expiry, rm):
+    if datetime.datetime.now().timestamp() > expiry:
+        access_token = rm._get_access_token(
+            config.ms_auth[TENANT], config.ms_auth[CLIENT_ID], config.ms_auth[CLIENT_SECRET], config.ms_auth[SCOPE]
+        )
+        if access_token:
+            session.headers["Authorization"] = f"Bearer {access_token}"
+            expiry = datetime.datetime.now().timestamp() + 3500
+    return expiry
 
 
-def _handle_tlp_level(parsed_event):
-    for tag in parsed_event['tags']:
-        if 'tlp:' in tag:
-            parsed_event['tlpLevel'] = tag.split(':')[1].lower().capitalize()
-        if parsed_event['tlpLevel'] == 'Clear':
-            parsed_event['tlpLevel'] = 'White'
-    if 'tlpLevel' not in parsed_event:
-        parsed_event['tlpLevel'] = 'Red'
+def _extract_skip_token(body):
+    next_link = body.get("nextLink")
+    if next_link:
+        qs = parse_qs(urlparse(next_link).query)
+        token = qs.get("$skipToken") or qs.get("skipToken")
+        if token:
+            return token[0]
+    return body.get("skipToken")
 
 
-def _get_misp_events_stix():
-    logger.info(f"Using the following values for MISP API call: domain: {config.misp_domain}")
+def _delete_sentinel_indicator(name, session):
+    url = (
+        f"https://management.azure.com/subscriptions/{config.ms_auth.get('subscription_id')}"
+        f"/resourceGroups/{config.ms_auth.get('resourceGroupName')}"
+        f"/providers/Microsoft.OperationalInsights/workspaces/{config.ms_auth.get('workspaceName')}"
+        f"/providers/Microsoft.SecurityInsights/threatIntelligence/main/indicators/{name}"
+        f"?api-version={config.ms_delete_api_version}"
+    )
+    for attempt in range(4):
+        try:
+            resp = session.delete(url, timeout=30)
+        except requests.exceptions.RequestException as e:
+            logger.error("Exception deleting indicator {}: {}".format(name, e))
+            return False
+        if resp.status_code in (200, 204):
+            return True
+        if resp.status_code == 404:
+            logger.debug("Indicator {} already gone (404)".format(name))
+            return True
+        if resp.status_code == 429:
+            retry_after = resp.headers.get("Retry-After")
+            try:
+                wait = float(retry_after) if retry_after else 2 ** attempt
+            except ValueError:
+                wait = 2 ** attempt
+            logger.warning("Rate-limited deleting {} (attempt {}), sleeping {}s".format(name, attempt + 1, wait))
+            time.sleep(wait)
+            continue
+        logger.error("Failed to delete indicator {}: {} {}".format(
+            name, resp.status_code, resp.text[:300] if resp.text else ""))
+        return False
+    logger.error("Giving up deleting indicator {} after repeated 429s".format(name))
+    return False
+
+
+def get_misp_toids_disabled(timeframe):
     misp = PyMISP(config.misp_domain, config.misp_key, config.misp_verifycert, False)
-    result_set = []
-    logger.debug("Query MISP for events.")
-    remaining_misp_pages = True
+
+    logger.info("Querying MISP for attributes with to_ids=False changed in the last {}".format(timeframe))
+    results = misp.search(controller='attributes', to_ids=0, timestamp=timeframe,
+                          type_attribute=list(UPLOAD_INDICATOR_MISP_ACCEPTED_TYPES), return_format='json')
+
+    attributes = []
+    if isinstance(results, dict):
+        attributes = results.get("Attribute", results.get("response", {}).get("Attribute", []))
+    elif isinstance(results, list):
+        attributes = results
+
+    values = []
+    for attr in attributes:
+        v = attr.get("value", "")
+        if v and v not in values:
+            values.append(v)
+
+    logger.info("Found {} unique attribute values with to_ids recently set to False".format(len(values)))
+    return values
+
+
+def delete_indicators_from_sentinel(values):
+    rm = RequestManager(0, logger, config.ms_auth[TENANT])
+    session, expiry = _get_sentinel_session(rm)
+    if not session:
+        logger.error("Could not get Sentinel access token for to_ids verification")
+        return 0, 0
+
+    url = (
+        f"https://management.azure.com/subscriptions/{config.ms_auth.get('subscription_id')}"
+        f"/resourceGroups/{config.ms_auth.get('resourceGroupName')}"
+        f"/providers/Microsoft.OperationalInsights/workspaces/{config.ms_auth.get('workspaceName')}"
+        f"/providers/Microsoft.SecurityInsights/threatIntelligence/main/queryIndicators"
+        f"?api-version={config.ms_delete_api_version}"
+    )
+
+    values_set = set(values)
+    to_delete = {}  # value -> indicator name
+
+    skip_token = None
+    while True:
+        expiry = _refresh_sentinel_session(session, expiry, rm)
+        payload = {"pageSize": 100, "includeDisabled": False, "sources": [config.sourcesystem]}
+        if skip_token:
+            payload["skipToken"] = skip_token
+        try:
+            resp = session.post(url, json=payload, timeout=60)
+            if resp.status_code != 200:
+                logger.error("Error querying Sentinel indicators: {}".format(resp.status_code))
+                break
+            body = resp.json()
+        except Exception as e:
+            logger.error("Exception querying Sentinel indicators: {}".format(e))
+            break
+
+        indicators = body.get("value", [])
+        if not indicators:
+            break
+
+        for indicator in indicators:
+            pattern = indicator.get("properties", {}).get("pattern", "")
+            for v in list(values_set):
+                if "'{}'".format(v) in pattern:
+                    to_delete[v] = indicator.get("name")
+                    values_set.discard(v)
+
+        if not values_set:
+            break
+
+        skip_token = _extract_skip_token(body)
+        if not skip_token:
+            break
+
+    deleted_count = 0
+    for attr_value, indicator_name in to_delete.items():
+        if not indicator_name:
+            continue
+        if config.dry_run:
+            logger.info("Dry run - would delete from Sentinel: {} ({})".format(attr_value, indicator_name))
+            deleted_count += 1
+            continue
+        expiry = _refresh_sentinel_session(session, expiry, rm)
+        if _delete_sentinel_indicator(indicator_name, session):
+            logger.info("Deleted from Sentinel: {} ({})".format(attr_value, indicator_name))
+            deleted_count += 1
+
+    not_found_count = len(values_set)
+    for v in values_set:
+        logger.debug("Not found in Sentinel: {}".format(v))
+
+    logger.info("to_ids verification complete: {} deleted, {} not found in Sentinel".format(deleted_count, not_found_count))
+    return deleted_count, not_found_count
+
+
+def verify_recent_toids_change():
+    values = get_misp_toids_disabled(config.timeframe_toids_change)
+    if values:
+        return delete_indicators_from_sentinel(values)
+    logger.info("No indicators to delete from Sentinel based on to_ids change")
+    return 0, 0
+
+
+def delete_outdated_indicators():
+    rm = RequestManager(0, logger, config.ms_auth[TENANT])
+    session, expiry = _get_sentinel_session(rm)
+    if not session:
+        logger.error("Could not get Sentinel access token for outdated indicator deletion")
+        return 0, 0
+
+    url = (
+        f"https://management.azure.com/subscriptions/{config.ms_auth.get('subscription_id')}"
+        f"/resourceGroups/{config.ms_auth.get('resourceGroupName')}"
+        f"/providers/Microsoft.OperationalInsights/workspaces/{config.ms_auth.get('workspaceName')}"
+        f"/providers/Microsoft.SecurityInsights/threatIntelligence/main/queryIndicators"
+        f"?api-version={config.ms_delete_api_version}"
+    )
+
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    payload = {
+        "sources": [config.sourcesystem],
+        "maxValidUntil": now,
+        "includeDisabled": False,
+        "pageSize": 100,
+    }
+
+    processed_names = set()
+    total_deleted = 0
+    total_failed = 0
+    skip_token = None
+
+    while True:
+        expiry = _refresh_sentinel_session(session, expiry, rm)
+        page_payload = dict(payload)
+        if skip_token:
+            page_payload["skipToken"] = skip_token
+        try:
+            resp = session.post(url, json=page_payload, timeout=60)
+            if resp.status_code != 200:
+                logger.error("Error querying outdated Sentinel indicators: {}".format(resp.status_code))
+                break
+            body = resp.json()
+        except Exception as e:
+            logger.error("Exception querying outdated Sentinel indicators: {}".format(e))
+            break
+
+        indicators = body.get("value", [])
+        if not indicators:
+            break
+
+        new_in_batch = 0
+        for indicator in indicators:
+            name = indicator.get("name", "")
+            if not name or name in processed_names:
+                continue
+            processed_names.add(name)
+            new_in_batch += 1
+
+            props = indicator.get("properties", {})
+            pattern = props.get("pattern", "")
+            valid_until = props.get("validUntil", "")
+
+            if config.dry_run:
+                logger.info("Dry run - would delete outdated indicator: {} (validUntil: {}, pattern: {})".format(
+                    name, valid_until, pattern))
+                continue
+
+            logger.info("Deleting: {} (validUntil: {}, pattern: {})".format(name, valid_until, pattern))
+            expiry = _refresh_sentinel_session(session, expiry, rm)
+            if _delete_sentinel_indicator(name, session):
+                total_deleted += 1
+            else:
+                total_failed += 1
+
+        skip_token = _extract_skip_token(body)
+        if not skip_token:
+            break
+        if new_in_batch == 0 and not config.dry_run:
+            # In live mode the deletes shrink the result set, so a page with no
+            # new names means Sentinel is still serving a stale view; stop here.
+            break
+
+    if config.dry_run:
+        logger.info("Outdated indicator cleanup complete (dry run)")
+    else:
+        logger.info("Outdated indicator cleanup: {} deleted, {} failed".format(total_deleted, total_failed))
+    return total_deleted, total_failed
+
+
+def init_decaying_cache(misp, event_uuid=None):
+    logger.info("Querying MISP for attribute decay scores")
+
+    decaying_cache = {}
     misp_page = 1
-    misp_indicator_ids = []
+    remaining_misp_pages = True
+    page_size = 10000
+    missing_score_count = 0
 
     while remaining_misp_pages:
+        search_kwargs = dict(
+            controller='attributes',
+            to_ids=1,
+            decayingModel=str(config.misp_decaying_model),
+            includeDecayScore=True,
+            type_attribute=list(UPLOAD_INDICATOR_MISP_ACCEPTED_TYPES),
+            return_format='json',
+            limit=page_size,
+            page=misp_page
+        )
+        # When processing a single event, scope the decay query to that event
+        # instead of scanning every attribute in the MISP instance.
+        if event_uuid:
+            search_kwargs["eventid"] = event_uuid
+
+        results = misp.search(**search_kwargs)
+
+        if isinstance(results, list):
+            attributes = results
+        elif isinstance(results, dict):
+            attributes = results.get("Attribute") or results.get("response", {}).get("Attribute", [])
+        else:
+            attributes = []
+
+        if not attributes:
+            remaining_misp_pages = False
+            continue
+
+        for attribute in attributes:
+            attribute_uuid = attribute.get("uuid")
+            if not attribute_uuid:
+                continue
+
+            score = None
+            try:
+                score = float(attribute.get("decay_score", [{}])[0].get("score"))
+            except (TypeError, ValueError, IndexError, AttributeError):
+                missing_score_count += 1
+
+            current_score = decaying_cache.get(attribute_uuid)
+            if current_score is None or (score is not None and score > current_score):
+                decaying_cache[attribute_uuid] = score
+
+        remaining_misp_pages = len(attributes) == page_size
+        misp_page += 1
+
+    logger.info("Initialized MISP decaying cache with {} unique attribute UUIDs".format(len(decaying_cache)))
+    if missing_score_count:
+        logger.debug("No usable decay score for {} attribute(s) with decaying model {}. ".format(missing_score_count, config.misp_decaying_model))
+    return decaying_cache
+
+
+def get_decaying_score(attribute_uuid, decaying_cache):
+    if not decaying_cache:
+        return None
+    return decaying_cache.get(attribute_uuid, None)
+
+
+def get_misp_events_upload_indicators(event_uuid=None):
+    misp = PyMISP(config.misp_domain, config.misp_key, config.misp_verifycert, False)
+    
+    if event_uuid:
+        misp_event_filters = {"uuid": event_uuid}
+        logger.info("Using event UUID filter: {}".format(event_uuid))
+    else:
+        misp_event_filters = config.misp_event_filters
+
+    use_decaying_score = False
+    decaying_cache = None
+    if config.misp_decaying_score_as_confidence or config.misp_decaying_score_threshold is not None:
+        use_decaying_score = True
+        decaying_cache = init_decaying_cache(misp, event_uuid)
+    
+    logger.debug("Query MISP for events")
+    remaining_misp_pages = True
+    indicator_count = 0
+    indicator_count_match_sentinel = 0
+    indicator_values = []
+    misp_page = 1
+
+    sentinel_session = None
+    sentinel_headers_expiry = 0
+    if config.ms_check_if_exist_in_sentinel:
+        rm = RequestManager(0, logger, config.ms_auth[TENANT])
+        sentinel_session, sentinel_headers_expiry = _get_sentinel_session(rm)
+        if not sentinel_session:
+            logger.error("Could not get Sentinel access token for existing indicator check")
+
+    if config.write_parsed_indicators:
+        # Clear existing parsed indicators file
+        with open(PARSED_INDICATORS_FILE_NAME, "w") as fp:
+            fp.write("")
+
+    while remaining_misp_pages:
+        result_set = []
+
         try:
-            if "limit" in config.misp_event_filters:
-                result = misp.search(controller='events', return_format='json', **config.misp_event_filters)
+            if "limit" in misp_event_filters:
+                result = misp.search(controller='events', return_format='json', **misp_event_filters)
                 remaining_misp_pages = False # Limits are set in the misp_event_filters
             else:
-                result = misp.search(controller='events', return_format='json', **config.misp_event_filters, limit=config.misp_event_limit_per_page, page=misp_page)
+                result = misp.search(controller='events', return_format='json', **misp_event_filters, limit=config.misp_event_limit_per_page, page=misp_page)
 
             if len(result) > 0:
                 logger.info("Received MISP events page {} with {} events".format(misp_page, len(result)))
                 for event in result:
                     misp_event = RequestObject_Event(event["Event"], logger, config.misp_flatten_attributes)
-                    try:
-                        parser = MISPtoSTIX21Parser()
-                        parser.parse_misp_event(misp_event.event)
-                        stix_objects = parser.stix_objects
-                    except Exception as e:
-                        logger.error("Error when processing data in event {} from MISP {}. Most likely a MISP-STIX conversion problem.".format(misp_event.id, e))
-                        continue
+
                     if config.write_parsed_eventid:
                         logger.info("Processing event {} {}".format(event["Event"]["id"], event["Event"]["info"]))
-                    for element in stix_objects:
-                        if element.type in UPLOAD_INDICATOR_API_ACCEPTED_TYPES and \
-                                        element.id not in misp_indicator_ids:
-                            misp_indicator = RequestObject_Indicator(element, misp_event, logger)
-                            if misp_indicator.id:
-                                if misp_indicator.valid_until:
-                                    valid_until = json.dumps(misp_indicator.valid_until, cls=STIXJSONEncoder).replace("\"", "")
-                                    # Strip the dots from 'valid_until' to avoid date parse errors
-                                    if "." in valid_until:
-                                        valid_until = valid_until.split(".")[0]
-                                    # There must be a "cleaner-Python" way to deal with converting these date formats
-                                    if "Z" in valid_until:
-                                        date_object = datetime.fromisoformat(valid_until[:-1])
-                                    else:
-                                        date_object = datetime.fromisoformat(valid_until)
-                                    if date_object > datetime.now():
+
+                    for element in misp_event.flatten_attributes:
+                        if element["value"] not in indicator_values:
+                            if element.get("to_ids", False) and \
+                                        element.get("type", "") in UPLOAD_INDICATOR_MISP_ACCEPTED_TYPES:
+
+                                decaying_score = None
+                                if use_decaying_score:
+                                    decaying_score = get_decaying_score(element.get("uuid", ""), decaying_cache)
+                                    if (
+                                        config.misp_decaying_score_threshold is not None
+                                        and decaying_score is not None
+                                        and decaying_score <= config.misp_decaying_score_threshold
+                                    ):
                                         if config.verbose_log:
-                                            logger.debug("Add {} to list of indicators to upload".format(misp_indicator.pattern))
-                                        misp_indicator_ids.append(misp_indicator.id)
-                                        result_set.append(misp_indicator._get_dict())
-                                    else:
-                                        logger.error("Skipping outdated indicator {} in event {}, valid_until: {}".format(misp_indicator.pattern, misp_event.id, valid_until))
-                                else:
-                                    logger.error("Skipping indicator because valid_until was not set by MISP/MISP2Sentinel {}".format(misp_indicator.id))
-                            else:
-                                logger.error("Unable to process indicator. Invalid indicator type or invalid valid_until date. Event {}".format(misp_event.id))
+                                                logger.debug("Skipping indicator {} due to low decay score ({})".format(
+                                                    element.get("value"), decaying_score
+                                                ))
+                                        continue
+
+                                misp_indicator = RequestObject_Indicator(element, misp_event, logger)
+                                if config.misp_decaying_score_as_confidence and decaying_score is not None:
+                                    misp_indicator.confidence = max(0, min(100, int(round(decaying_score))))
+                                #print(misp_indicator._get_dict())
+                                if misp_indicator.valid_until:
+                                    try:
+                                        vu_dt = datetime.datetime.strptime(misp_indicator.valid_until, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
+                                    except Exception:
+                                        try:
+                                            vu_dt = datetime.datetime.fromisoformat(misp_indicator.valid_until.replace('Z', '+00:00'))
+                                        except Exception:
+                                            logger.debug("Unable to parse valid_until {}, skipping indicator {}".format(misp_indicator.valid_until, element["value"]))
+                                            continue
+                                    if vu_dt <= datetime.datetime.now(datetime.timezone.utc):
+                                        logger.debug("Skipping indicator because valid_until is in the past: {} {}".format(misp_indicator.valid_until, element["value"]))
+                                        continue
+
+                                if misp_indicator.pattern is not None:
+                                    is_custom = element.get("type", "") in MISP_CUSTOM_ATTRIBUTE
+                                    try:
+                                        if not is_custom:
+                                            parsed = parse(misp_indicator._get_dict(), allow_custom=False)
+                                        skip_to_sentinel = False
+                                        if config.ms_check_if_exist_in_sentinel:
+                                            sentinel_headers_expiry = _refresh_sentinel_session(sentinel_session, sentinel_headers_expiry, rm)
+                                            start_time = datetime.datetime.now(datetime.timezone.utc)
+                                            in_sentinel = already_in_sentinel(misp_indicator.pattern, sentinel_session)
+                                            end_time = datetime.datetime.now(datetime.timezone.utc)
+                                            duration = end_time - start_time
+                                            logger.debug("already_in_sentinel check duration for {} {}".format(misp_indicator.pattern, str(duration)))
+                                            if in_sentinel:
+                                                skip_to_sentinel = True
+                                                indicator_count_match_sentinel += 1
+                                                logger.info("Skipping indicator already in Sentinel: {}".format(misp_indicator.pattern))
+                                        if not skip_to_sentinel:
+                                            if config.verbose_log:
+                                                logger.debug("Add {} to list of indicators to upload".format(misp_indicator.pattern))
+                                                if config.misp_decaying_score_as_confidence:
+                                                    logger.debug("Confidence from decaying score: {}".format(misp_indicator.confidence))
+                                            result_set.append(misp_indicator._get_dict())
+                                            indicator_values.append(element["value"])
+                                    except exceptions.STIXError as e:
+                                        logger.error("Skipping invalid STIX indicator {} : {} from MISP event {} .".format(e, element.get("value", ""), misp_event.id))
+
                 logger.info("Processed {} indicators".format(len(result_set)))
+                indicator_count = indicator_count + len(result_set)
                 misp_page += 1
             else:
                 remaining_misp_pages = False
 
-        except exceptions.MISPServerError as e:
-            remaining_misp_pages = False
-            logger.error("Error received from the MISP server {} - {} - {}".format(e, sys.exc_info()[2].tb_lineno, sys.exc_info()[1]))
+            if config.dry_run:
+                logger.info("Dry run. Not uploading to Sentinel")
+                if config.write_parsed_indicators:
+                    write_parsed_indicators(result_set)
+            else:
+                with RequestManager(len(result_set), logger, config.ms_auth[TENANT]) as request_manager:
+                    logger.info("Start uploading indicators")
+                    request_manager.upload_indicators(result_set)
+                    logger.info("Finished uploading indicators")
+                    if config.write_parsed_indicators:
+                        write_parsed_indicators(result_set)
         except Exception as e:
             remaining_misp_pages = False
             logger.error("Error when processing data from MISP {} - {} - {}".format(e, sys.exc_info()[2].tb_lineno, sys.exc_info()[1]))
 
-    return result_set, len(result_set)
+    return indicator_count, indicator_count_match_sentinel
 
 
-def _init_configuration():
-    config_mapping = {
-        "graph_auth": "ms_auth",
-        "targetProduct": "ms_target_product",
-        "action": "ms_action",
-        "passiveOnly": "ms_passiveonly",
-        "defaultConfidenceLevel": "default_confidence"
-    }
-
-    use_old_config = False
-    for old_value in config_mapping:
-        if hasattr(config, old_value):
-            p = getattr(config, old_value)
-            setattr(config, config_mapping[old_value], p)
-            use_old_config = True
-
+def init_configuration():
     if not hasattr(config, "log_file"):
         sys.exit("Exiting. No log file configuration setting found (log_file).")
     if not (hasattr(config, "misp_domain") and hasattr(config, "misp_key") and hasattr(config, "misp_verifycert")):
@@ -192,13 +552,25 @@ def _init_configuration():
     if not hasattr(config, "write_parsed_eventid"):
         config.write_parsed_eventid = False
     if not hasattr(config, "misp_flatten_attributes"):
-        config.misp_flatten_attributes = False
+        config.misp_flatten_attributes = True
     if not hasattr(config, "sourcesystem"):
         config.sourcesystem = "MISP"
     if not hasattr(config, "dry_run"):
         config.dry_run = False
-
-    return use_old_config
+    if not hasattr(config, "remove_pipe_from_misp_attribute"):
+        config.remove_pipe_from_misp_attribute = True
+    if not hasattr(config, "ms_check_if_exist_in_sentinel"):
+        config.ms_check_if_exist_in_sentinel = False
+    if not hasattr(config, "timeframe_toids_change"):
+        config.timeframe_toids_change = "1d"
+    if not hasattr(config, "ms_delete_api_version"):
+        config.ms_delete_api_version = "2025-09-01"
+    if not hasattr(config, "misp_decaying_score_as_confidence"):
+        config.misp_decaying_score_as_confidence = False
+    if not hasattr(config, "misp_decaying_score_threshold"):
+        config.misp_decaying_score_threshold = None
+    if not hasattr(config, "misp_decaying_model"):
+        config.misp_decaying_model = 1
 
 
 global _build_logger
@@ -219,80 +591,70 @@ def _build_logger():
 
     return logger
 
+def write_parsed_indicators(parsed_indicators):
+    json_formatted_str = json.dumps(parsed_indicators, indent=4)
+    with open(PARSED_INDICATORS_FILE_NAME, "a") as fp:
+        fp.write(json_formatted_str)
+
 def main():
-    logger.info("Fetching and parsing data from MISP ...")
-    if config.ms_auth.get("graph_api", False):
-        logger.info("Using Microsoft Graph API")
-        events = _get_events()
-        parsed_events = list()
-        for event in events:
-            parsed_event = defaultdict(list)
+    parser = argparse.ArgumentParser(description="MISP to Microsoft Sentinel indicator sync")
+    parser.add_argument("--uuid", type=str, help="Process a single MISP event by UUID")
+    parser.add_argument("--verify-recent-toids-change", action="store_true",
+                        help="Find attributes where to_ids was recently set to False and delete them from Sentinel")
+    parser.add_argument("--delete-outdated-indicators", action="store_true",
+                        help="Delete expired indicators from Sentinel")
+    args = parser.parse_args()
 
-            for key, mapping in EVENT_MAPPING.items():
-                parsed_event[mapping] = event.get(key, "")
+    run_start = datetime.datetime.now(datetime.timezone.utc)
 
-            # Tags on event level
-            tags = []
-            for tag in event.get("Tag", []):
-                if 'sentinel-threattype' in tag['name']:    # Can be overridden on attribute level
-                    parsed_event['threatType'] = tag['name'].split(':')[1]
-                    continue
-                if config.ignore_localtags:
-                    if tag["local"] != 1:
-                        tags.append(tag['name'].strip())
-            parsed_event['tags'] = tags
-            _handle_diamond_model(parsed_event)
-            _handle_tlp_level(parsed_event)
-            _handle_timestamp(parsed_event)
+    event_uuid = None
+    if args.uuid:
+        try:
+            uuid_obj = uuid.UUID(args.uuid.strip())
+            event_uuid = str(uuid_obj)
+            logger.info("Valid UUID parameter provided: {}".format(event_uuid))
+        except ValueError:
+            logger.error("Invalid UUID parameter provided: {}. Exiting.".format(args.uuid))
+            sys.exit(1)
 
-            for attr in event['Attribute']:
-                if attr['type'] == 'threat-actor':
-                    parsed_event['activityGroupNames'].append(attr['value'])
-                if attr['type'] == 'comment':
-                    parsed_event['description'] += attr['value']
-                if attr['type'] in MISP_ACTIONABLE_TYPES and attr['to_ids'] == True:
-                    parsed_event['request_objects'].append(RequestObject(attr, parsed_event['description']))
-            for obj in event['Object']:
-                for attr in obj['Attribute']:
-                    if attr['type'] == 'threat-actor':
-                        parsed_event['activityGroupNames'].append(attr['value'])
-                    if attr['type'] == 'comment':
-                        parsed_event['description'] += attr['value']
-                    if attr['type'] in MISP_ACTIONABLE_TYPES and attr['to_ids'] == True:
-                        parsed_event['request_objects'].append(RequestObject(attr, parsed_event['description']))
-            parsed_events.append(parsed_event)
-        del events
-        total_indicators = sum([len(v['request_objects']) for v in parsed_events])
+    if args.verify_recent_toids_change:
+        logger.info("Running to_ids verification")
+        toids_deleted, toids_not_found = verify_recent_toids_change()
     else:
-        logger.info("Using Microsoft Upload Indicator API")
-        parsed_indicators, total_indicators = _get_misp_events_stix()
-        logger.info("Received {} indicators in MISP".format(total_indicators))
+        toids_deleted, toids_not_found = 0, 0
 
-    if config.dry_run:
-        logger.info("Dry run. Not uploading to Sentinel")
+    if args.delete_outdated_indicators:
+        logger.info("Running outdated indicator cleanup")
+        outdated_deleted, outdated_failed = delete_outdated_indicators()
     else:
-        with RequestManager(total_indicators, logger, config.ms_auth[TENANT]) as request_manager:
-            if config.ms_auth["graph_api"]:
-                for request_body in _graph_post_request_body_generator(parsed_events):
-                    if config.verbose_log:
-                        logger.debug("request body: {}".format(request_body))
-                    request_manager.handle_indicator(request_body)
-            else:
-                logger.info("Start uploading indicators")
-                request_manager.upload_indicators(parsed_indicators)
-                logger.info("Finished uploading indicators")
-                if config.write_parsed_indicators:
-                    json_formatted_str = json.dumps(parsed_indicators, indent=4)
-                    with open("parsed_indicators.txt", "w") as fp:
-                        fp.write(json_formatted_str)
+        outdated_deleted, outdated_failed = 0, 0
+
+    logger.info("Fetching and parsing data from MISP {}".format(config.misp_domain))
+    logger.info("Using Microsoft Upload Indicator API")
+    total_indicators, indicator_count_match_sentinel = get_misp_events_upload_indicators(event_uuid)
+    logger.info("Pushed {} indicators from MISP to Sentinel".format(total_indicators))
+    if config.ms_check_if_exist_in_sentinel:
+        logger.info("Skipped {} MISP indicators because they were already in Sentinel".format(indicator_count_match_sentinel))
+
+    duration = datetime.datetime.now(datetime.timezone.utc) - run_start
+    logger.info("====== Run statistics ======")
+    logger.info("  Duration                              : {}".format(str(duration).split(".")[0]))
+    logger.info("  Dry run                               : {}".format(bool(config.dry_run)))
+    logger.info("  Indicators pushed to Sentinel         : {}".format(total_indicators))
+    if config.ms_check_if_exist_in_sentinel:
+        logger.info("  Indicators skipped (already present)  : {}".format(indicator_count_match_sentinel))
+    if args.verify_recent_toids_change:
+        logger.info("  to_ids deletions (deleted/not found)  : {} / {}".format(toids_deleted, toids_not_found))
+    if args.delete_outdated_indicators:
+        logger.info("  Outdated deletions (deleted/failed)   : {} / {}".format(outdated_deleted, outdated_failed))
+    logger.info("============================")
 
 
 if __name__ == '__main__':
-    check_for_old_config = _init_configuration()
-    logger = _build_logger()
-
-    logger.info("Start MISP2Sentinel")
-    if check_for_old_config:
-        logger.info("You're using an older configuration setting. Update config.py to the new configuration setting.")
+    logger = _build_logger()    
+    logger.info("====== Start MISP2Sentinel ======")
+    logger.info("Initializing configuration")
+    init_configuration()
     main()
-    logger.info("End MISP2Sentinel")
+    logger.info("====== End MISP2Sentinel ======")
+
